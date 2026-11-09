@@ -1,0 +1,211 @@
+import json
+import math
+from pathlib import Path
+import struct
+import subprocess
+import sys
+import tempfile
+
+
+CLI = Path(sys.argv[1])
+PREFIX = "model.language_model."
+
+
+def run(*args, error=None):
+    result = subprocess.run(
+        [CLI, *args], text=True, capture_output=True, check=False
+    )
+    if error is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0 and error in result.stderr, result
+    return result.stdout
+
+
+def write_checkpoint(directory, *, invalid_weight=False):
+    config = {
+        "model_type": "qwen3_5",
+        "tie_word_embeddings": True,
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "tie_word_embeddings": True,
+            "attention_bias": False,
+            "attn_output_gate": True,
+            "hidden_act": "silu",
+            "mlp_only_layers": [],
+            "hidden_size": 33,
+            "intermediate_size": 9,
+            "vocab_size": 5,
+            "num_hidden_layers": 2,
+            "head_dim": 8,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "linear_num_key_heads": 1,
+            "linear_num_value_heads": 2,
+            "linear_key_head_dim": 4,
+            "linear_value_head_dim": 4,
+            "linear_conv_kernel_dim": 4,
+            "max_position_embeddings": 128,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "rope_type": "default",
+                "mrope_interleaved": True,
+                "partial_rotary_factor": 0.5,
+                "mrope_section": [1, 1, 0],
+                "rope_theta": 1e7,
+            },
+            "layer_types": ["linear_attention", "full_attention"],
+        },
+    }
+    (directory / "config.json").write_text(json.dumps(config))
+
+    embedding = [0.0] * (5 * 33)
+    embedding[:5] = [127.0, -127.0, 2.5, -1.5, 0.5]
+    embedding[32] = -1.0
+    embedding[4 * 33] = 2.0
+    if invalid_weight:
+        embedding[-1] = float("nan")
+    entries = [(PREFIX + "embed_tokens.weight", [5, 33], "BF16", embedding)]
+    entries.append((PREFIX + "norm.weight", [33], "BF16", [0.5] * 33))
+
+    def add(layer, name, shape, dtype="BF16", value=0.0):
+        entries.append(
+            (f"{PREFIX}layers.{layer}.{name}", shape, dtype, [value] * math.prod(shape))
+        )
+
+    for layer in range(2):
+        add(layer, "input_layernorm.weight", [33])
+        add(layer, "post_attention_layernorm.weight", [33])
+        add(layer, "mlp.gate_proj.weight", [9, 33])
+        add(layer, "mlp.up_proj.weight", [9, 33])
+        add(layer, "mlp.down_proj.weight", [33, 9])
+    for name, shape in (
+        ("in_proj_qkv.weight", [16, 33]),
+        ("in_proj_z.weight", [8, 33]),
+        ("in_proj_a.weight", [2, 33]),
+        ("in_proj_b.weight", [2, 33]),
+        ("out_proj.weight", [33, 8]),
+        ("conv1d.weight", [16, 1, 4]),
+        ("dt_bias", [2]),
+    ):
+        add(0, f"linear_attn.{name}", shape)
+    add(0, "linear_attn.A_log", [2], "F32", -0.125)
+    add(0, "linear_attn.norm.weight", [4], "F32", 1.0)
+    for name, shape in (
+        ("q_proj.weight", [32, 33]),
+        ("k_proj.weight", [8, 33]),
+        ("v_proj.weight", [8, 33]),
+        ("o_proj.weight", [33, 16]),
+        ("q_norm.weight", [8]),
+        ("k_norm.weight", [8]),
+    ):
+        add(1, f"self_attn.{name}", shape)
+    entries += [
+        ("model.visual.pos_embed.weight", [1], "BF16", [0.0]),
+        ("mtp.fc.weight", [1], "BF16", [0.0]),
+    ]
+
+    index = {"metadata": {"total_size": 0}, "weight_map": {}}
+    for i in range(2):
+        shard = f"model-{i + 1:05d}-of-00002.safetensors"
+        header = {"__metadata__": {"format": "pt"}}
+        payload = bytearray()
+        for name, shape, dtype, values in entries[i::2]:
+            start = len(payload)
+            for value in values:
+                encoded = struct.pack("<f", value)
+                payload.extend(encoded[2:] if dtype == "BF16" else encoded)
+            header[name] = {
+                "dtype": dtype,
+                "shape": shape,
+                "data_offsets": [start, len(payload)],
+            }
+            index["weight_map"][name] = shard
+        index["metadata"]["total_size"] += len(payload)
+        encoded = json.dumps(header).encode()
+        encoded += b" " * (-len(encoded) % 8)
+        (directory / shard).write_bytes(
+            struct.pack("<Q", len(encoded)) + encoded + payload
+        )
+    (directory / "model.safetensors.index.json").write_text(json.dumps(index))
+
+
+def test_conversion(directory):
+    write_checkpoint(directory)
+    first = directory / "first.llmi"
+    second = directory / "second.llmi"
+    run("convert", directory, first)
+    run("convert", directory, second)
+    data = first.read_bytes()
+    assert data == second.read_bytes()
+
+    def inspect_tensor(model, tensor):
+        return json.loads(run("inspect", model, "--tensor", tensor, "--json"))
+
+    summary = inspect_tensor(first, "embed_tokens.weight")
+    tensor = summary["tensor"]
+    assert tensor == inspect_tensor(first, "lm_head.weight")["tensor"]
+    assert tensor["shape"] == [5, 33] and tensor["storage_shape"] == [5, 64]
+    assert tensor["layout"] == "RowMajorI8Group32" and tensor["dtype"] == "I8"
+    assert summary["tensor_count"] == 27
+    assert summary["manifest"]["weight_group_size"] == 32
+    assert summary["manifest"]["skipped_tensors"] == [
+        "model.visual.pos_embed.weight",
+        "mtp.fc.weight",
+    ]
+
+    offset = tensor["data"]["offset"]
+    quantized = struct.unpack_from("<320b", data, offset)
+    assert quantized[:5] == (127, -127, 2, -2, 0)
+    assert quantized[32] == -127 and not any(quantized[33:256])
+    assert quantized[256] == 127 and not any(quantized[257:])
+    scale = struct.unpack_from("<10e", data, tensor["scales"]["offset"])
+    assert scale[0] == 1 and scale[1] == struct.unpack("<e", struct.pack("<e", 1 / 127))[0]
+    assert scale[2:8] == (1,) * 6 and scale[-1] == 1
+
+    norm = inspect_tensor(first, "layers.0.linear_attn.A_log")["tensor"]
+    assert norm["dtype"] == "F32"
+    assert struct.unpack_from("<2f", data, norm["data"]["offset"]) == (-0.125, -0.125)
+    conv = inspect_tensor(first, "layers.0.linear_attn.conv1d.weight")["tensor"]
+    assert conv["dtype"] == "F16"
+
+    dense = directory / "dense.llmi"
+    run("convert", directory, dense, "--precision", "f16")
+    dense_tensor = inspect_tensor(dense, "lm_head.weight")["tensor"]
+    assert dense_tensor["dtype"] == "F16" and dense_tensor["shape"] == [5, 33]
+    assert dense_tensor["scales"]["size"] == 0
+    assert struct.unpack_from("<5e", dense.read_bytes(), dense_tensor["data"]["offset"]) == (
+        127.0, -127.0, 2.5, -1.5, 0.5
+    )
+
+    bad = directory / "bad.llmi"
+    bad.write_bytes(data[:-1])
+    run("inspect", bad, error="file length")
+    bad.write_bytes(b"BAD!" + data[4:])
+    run("inspect", bad, error="magic")
+
+    directory_offset = struct.unpack_from("<Q", data, 32)[0]
+    changed = bytearray(data)
+    struct.pack_into("<Q", changed, directory_offset + 160, 0)
+    bad.write_bytes(changed)
+    run("inspect", bad, error="directory entry")
+    changed = bytearray(data)
+    changed[offset] ^= 1
+    bad.write_bytes(changed)
+    run("inspect", bad, error="checksum")
+
+    write_checkpoint(directory, invalid_weight=True)
+    run("convert", directory, first, error="Non-finite weight")
+    assert first.read_bytes() == data
+    assert not list(directory.glob("*.tmp.*"))
+
+    index_path = directory / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    index["weight_map"][PREFIX + "embed_tokens.weight"] = "../outside.safetensors"
+    index_path.write_text(json.dumps(index))
+    run("convert", directory, first, error="shard filename")
+    assert first.read_bytes() == data
+
+
+with tempfile.TemporaryDirectory(prefix="llmi-test-") as path:
+    test_conversion(Path(path))

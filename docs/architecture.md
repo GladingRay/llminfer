@@ -52,9 +52,18 @@ w_hat  = fp32(q) * fp32(scale)
 
 全零组使用 `scale=1, q=0`，尾组补零，非有限权重和转换后溢出均报错。`RowMajorI8Group32` 的字节布局为连续 `int8[N, Kpad]` 和独立的 `fp16[N, Kpad/32]` scale 区，其中 `Kpad=32×ceil(K/32)`。Embedding 只解量化所选行。后续 tile packing 使用独立 `layoutId`。
 
-`.llmi` v1 由固定小端文件头、UTF-8 JSON 配置、tensor 目录和对齐的数据区构成。文件头记录 magic、版本、架构 ID、各区间的 64 位偏移和长度。目录记录 `TensorId`、逻辑形状、存储形状、dtype、`layoutId`、数据和 scale 区间。配置记录 W8A8 的量化规格及其版本。动态激活及其 scale 由 GPU 在运行时生成，存放于临时 arena。存储项使用固定字段编码，避免依赖 C++ struct 内存布局。Loader 在分配前检查版本、整数溢出、范围重叠、对齐、类型和模型配置一致性。
+`.llmi` v1 使用固定小端编码，文件布局如下。
 
-Loader 按行切分超长矩阵并在执行计划中保留行范围。输出投影可分片写入同一个逻辑 logits 向量，embedding 可按 token ID 定位行片段。按设备 `maxBufferLength` 拆分 Metal buffer，首版从映射文件分片复制到 Metal buffer。后续可按设备要求对齐并评估 `bytesNoCopy`，映射生命周期覆盖所有使用它的 GPU 工作。[Apple Metal buffer 上限](https://developer.apple.com/documentation/metal/mtldevice/maxbufferlength) · [Apple Metal 无拷贝 buffer](https://developer.apple.com/documentation/metal/mtldevice/makebuffer%28bytesnocopy%3Alength%3Aoptions%3Adeallocator%3A%29) · [Safetensors 格式](https://github.com/safetensors/safetensors#format)
+| 区域 | 编码 |
+| --- | --- |
+| 文件头 | 72 字节。依次为 8 字节 magic（十六进制 `4c 4c 4d 49 0d 0a 1a 0a`）、32 位格式版本和架构 ID、6 个 64 位字段（manifest 偏移和长度、目录偏移和条数、payload 偏移和长度）、32 位 CRC32 和 32 位保留零。CRC32 覆盖文件头之后的全部字节。 |
+| Manifest | UTF-8 JSON，记录原始配置、权重量化规格、跳过的张量和 `lm_head.weight` 别名。 |
+| Tensor 目录 | 每条 192 字节，按 `TensorId` 排序。依次为 96 字节零填充 ID、4 个 32 位字段（dtype、layout、rank、保留零）、逻辑形状和存储形状各 3 个 64 位维度（未使用项为零）、数据及 scale 各自的 64 位偏移和长度。 |
+| Payload | 按目录顺序存放数据及 scale。目录、各数据区和 scale 区的起点按 64 字节对齐，空隙填零。动态激活及其 scale 由 GPU 在运行时生成，存放于临时 arena。 |
+
+Loader 根据 manifest 重建预期张量目录并逐条验证，从而拒绝与模型配置不一致的形状、类型、范围重叠和无效偏移，再检查 CRC32。C++ `ModelFile` 通过 `getTensor` 解析别名，并提供按已验证区间读取数据的接口。
+
+Loader 提供 `splitRows`，按设备 `maxBufferLength` 返回数据和 scale 的完整行区间。Metal 执行计划可据此拆分 buffer，把输出投影分片写入同一个逻辑 logits 向量，并按 token ID 定位 embedding 行。当前加载器按区间读取文件。后续可按设备要求评估映射和 `bytesNoCopy`，映射生命周期需覆盖所有使用它的 GPU 工作。[Apple Metal buffer 上限](https://developer.apple.com/documentation/metal/mtldevice/maxbufferlength) · [Apple Metal 无拷贝 buffer](https://developer.apple.com/documentation/metal/mtldevice/makebuffer%28bytesnocopy%3Alength%3Aoptions%3Adeallocator%3A%29) · [Safetensors 格式](https://github.com/safetensors/safetensors#format)
 
 ## 4. 文本图与 Metal 算子
 
