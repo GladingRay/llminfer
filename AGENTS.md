@@ -26,7 +26,7 @@ The sole commit is `Initial commit`. Use short, imperative subjects for new comm
 2. commit message与代码中的注释需要使用英文。
 3. 文档使用中文书写。
 4. 代码风格、命名规范与注释格式与MLIR保持一致。
-5. 项目主体使用C++实现，可辅以部分python与shell脚本。
+5. 项目主体使用 C++17 实现，可辅以 Python 与 Shell 脚本。
 6. 不同的模块要放在不同的文件中，不同的大组件要放到不同的目录中。
 7. qwen3.5 4B 的路径在 `/Users/guorui/Work/models/qwen3.5-4b` 。
 8. python环境：`/Users/guorui/Work/models/venv314`。
