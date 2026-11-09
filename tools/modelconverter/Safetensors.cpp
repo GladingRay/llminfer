@@ -30,7 +30,7 @@ Result<SourceTensor> parseTensor(const File &file, const json &entry,
   if (!dims.is_array() || dims.size() > 8)
     return Error("Invalid safetensors shape");
 
-  std::vector<uint64_t> shape;
+  CacheLineAlignedVector<uint64_t> shape;
   uint64_t bytes = getSourceTypeSize(*type);
   for (const auto &dim : dims) {
     if (!dim.is_number_unsigned())
@@ -79,7 +79,7 @@ Result<uint64_t> readShard(const File &file, const std::string &shardName,
     return Error("Expected a safetensors header object");
 
   uint64_t dataStart = prefix.size() + headerLength;
-  std::vector<ByteRange> ranges;
+  CacheLineAlignedVector<ByteRange> ranges;
   for (auto it = entries->begin(); it != entries->end(); ++it) {
     if (it.key() == "__metadata__") {
       if (!it->is_object() ||

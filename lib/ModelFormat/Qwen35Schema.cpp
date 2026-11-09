@@ -19,8 +19,8 @@ double number(const json &value) {
   return value.is_number() ? value.get<double>() : 0.0;
 }
 
-Result<std::vector<TensorSpec>> getTextTensors(const json &config,
-                                               Precision precision) {
+Result<CacheLineAlignedVector<TensorSpec>> getTextTensors(const json &config,
+                                                          Precision precision) {
   if (auto error = require(config, "model_type", "qwen3_5"))
     return error;
   if (auto error = require(config, "tie_word_embeddings", true))
@@ -98,14 +98,14 @@ Result<std::vector<TensorSpec>> getTextTensors(const json &config,
     return Error("Invalid layer_types array");
 
   DType matrix = precision == Precision::W8A8 ? DType::I8 : DType::F16;
-  std::vector<TensorSpec> tensors;
+  CacheLineAlignedVector<TensorSpec> tensors;
   tensors.push_back({std::string(embeddingId), {vocabulary, hidden}, matrix});
   tensors.push_back({"norm.weight", {hidden}, DType::F32});
 
   for (size_t i = 0; i < layers.size(); ++i) {
     const std::string prefix = "layers." + std::to_string(i) + ".";
-    auto add = [&](std::string_view name, std::vector<uint64_t> shape,
-                   DType dtype) {
+    auto add = [&](std::string_view name,
+                   CacheLineAlignedVector<uint64_t> shape, DType dtype) {
       tensors.push_back({prefix + std::string(name), std::move(shape), dtype});
     };
     add("input_layernorm.weight", {hidden}, DType::F32);
@@ -174,7 +174,7 @@ Result<json> llminfer::parseJson(std::string_view text) {
     }
   }
 
-  std::vector<std::unordered_set<std::string>> keys;
+  CacheLineAlignedVector<std::unordered_set<std::string>> keys;
   std::string duplicate;
   auto parsed = json::parse(
       text.begin(), text.end(),
@@ -243,9 +243,9 @@ Result<ModelSchema> llminfer::getModelSchema(std::string_view manifest) {
   return ModelSchema{precision, std::move(*tensors)};
 }
 
-std::string
-llminfer::makeManifest(const json &sourceConfig, Precision precision,
-                       const std::vector<std::string> &skippedTensors) {
+std::string llminfer::makeManifest(
+    const json &sourceConfig, Precision precision,
+    const CacheLineAlignedVector<std::string> &skippedTensors) {
   return json{
       {"precision", getPrecisionName(precision)},
       {"quantization_version", 1},

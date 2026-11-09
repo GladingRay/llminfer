@@ -1,6 +1,7 @@
 #ifndef LLMINFER_MODELFORMAT_MODELFILE_H
 #define LLMINFER_MODELFORMAT_MODELFILE_H
 
+#include "llminfer/Support/CacheLineAlignedVector.h"
 #include "llminfer/Support/Result.h"
 #include <cstddef>
 #include <cstdint>
@@ -9,7 +10,6 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace llminfer {
 
@@ -24,14 +24,14 @@ struct ByteRange {
 
 struct TensorSpec {
   std::string id;
-  std::vector<uint64_t> shape;
+  CacheLineAlignedVector<uint64_t> shape;
   DType dtype;
 };
 
 struct TensorRecord {
   TensorSpec spec;
   Layout layout;
-  std::vector<uint64_t> storageShape;
+  CacheLineAlignedVector<uint64_t> storageShape;
   ByteRange data;
   ByteRange scales;
 };
@@ -47,8 +47,8 @@ std::string_view getDTypeName(DType dtype);
 std::string_view getLayoutName(Layout layout);
 
 /// Splits a rank-two tensor into row ranges whose buffers fit independently.
-Result<std::vector<RowSlice>> splitRows(const TensorRecord &tensor,
-                                        uint64_t maxBufferLength);
+Result<CacheLineAlignedVector<RowSlice>> splitRows(const TensorRecord &tensor,
+                                                   uint64_t maxBufferLength);
 
 class ModelFile {
 public:
@@ -58,7 +58,7 @@ public:
   ModelFile(ModelFile &&) noexcept;
   ModelFile &operator=(ModelFile &&) noexcept;
 
-  const std::vector<TensorRecord> &getTensors() const;
+  const CacheLineAlignedVector<TensorRecord> &getTensors() const;
   const TensorRecord *getTensor(std::string_view id) const;
   Precision getPrecision() const;
   const std::string &getManifest() const;

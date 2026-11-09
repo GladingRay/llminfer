@@ -100,7 +100,7 @@ struct WeightSlice {
 
 struct Weight {
   unsigned rows = 0, width = 0;
-  std::vector<WeightSlice> slices;
+  CacheLineAlignedVector<WeightSlice> slices;
 };
 
 Result<Weight> loadWeight(const ModelFile &model, MetalContext &metal,
@@ -147,8 +147,8 @@ Result<Buffer> allocateState(MetalContext &metal, uint64_t elements,
   return buffer;
 }
 
-std::vector<float> readHalf(Buffer buffer, uint64_t count) {
-  std::vector<float> result(count);
+CacheLineAlignedVector<float> readHalf(Buffer buffer, uint64_t count) {
+  CacheLineAlignedVector<float> result(count);
   const auto *input = static_cast<const uint16_t *>(buffer.contents);
   std::transform(input, input + count, result.begin(), halfToFloat);
   return result;
@@ -367,7 +367,7 @@ struct MetalReferenceGraph::Impl {
             readHalf(block.output, hidden)};
   }
 
-  Result<ReferenceTrace> step(const std::vector<uint32_t> &ids) {
+  Result<ReferenceTrace> step(const CacheLineAlignedVector<uint32_t> &ids) {
     if (invalid)
       return Error("Reference session is invalid after a failed GPU step");
     if (ids.empty() || ids.size() > capacity - past)
@@ -402,7 +402,7 @@ struct MetalReferenceGraph::Impl {
         traceBlock(deltaBlock, tokens),
         traceBlock(gqaBlock, tokens),
         readHalf(convHistory, historyElements()),
-        std::vector<float>(state, state + stateElements()),
+        CacheLineAlignedVector<float>(state, state + stateElements()),
         readHalf(kvKeys, uint64_t(past) * config.kvWidth),
         readHalf(logits, uint64_t(tokens) * config.vocabulary)};
   }
@@ -454,7 +454,7 @@ MetalReferenceGraph::open(const std::filesystem::path &path,
 }
 
 Result<ReferenceTrace>
-MetalReferenceGraph::step(const std::vector<uint32_t> &tokenIds) {
+MetalReferenceGraph::step(const CacheLineAlignedVector<uint32_t> &tokenIds) {
   @autoreleasepool {
     return impl->step(tokenIds);
   }

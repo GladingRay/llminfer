@@ -41,7 +41,7 @@ struct FilePlan {
   ByteRange manifest;
   ByteRange directory;
   ByteRange payload;
-  std::vector<TensorRecord> tensors;
+  CacheLineAlignedVector<TensorRecord> tensors;
 
   uint64_t size() const { return payload.offset + payload.size; }
 };
@@ -55,7 +55,7 @@ bool reserveRange(uint64_t &cursor, uint64_t bytes, ByteRange &range) {
 }
 
 Result<FilePlan> planFile(uint64_t manifestSize,
-                          const std::vector<TensorSpec> &specs) {
+                          const CacheLineAlignedVector<TensorSpec> &specs) {
   if (manifestSize == 0 || manifestSize > maxManifestSize)
     return Error("Invalid .llmi manifest size");
   FilePlan plan;
@@ -130,7 +130,7 @@ Entry encodeEntry(const TensorRecord &tensor) {
 }
 
 Result<uint32_t> checksumFile(const File &file, uint64_t size) {
-  std::vector<uint8_t> buffer(1 << 20);
+  CacheLineAlignedVector<uint8_t> buffer(1 << 20);
   uLong checksum = crc32(0, Z_NULL, 0);
   for (uint64_t offset = headerSize; offset < size;) {
     auto count =
@@ -182,8 +182,8 @@ std::string_view llminfer::getLayoutName(Layout layout) {
   return "Unknown";
 }
 
-Result<std::vector<RowSlice>> llminfer::splitRows(const TensorRecord &tensor,
-                                                  uint64_t maxBufferLength) {
+Result<CacheLineAlignedVector<RowSlice>>
+llminfer::splitRows(const TensorRecord &tensor, uint64_t maxBufferLength) {
   if (tensor.spec.shape.size() != 2 || tensor.spec.shape[0] == 0)
     return Error("Row slicing requires a nonempty rank-two tensor");
   uint64_t rows = tensor.spec.shape[0];
@@ -199,7 +199,7 @@ Result<std::vector<RowSlice>> llminfer::splitRows(const TensorRecord &tensor,
   if (tensor.data.size > UINT64_MAX - tensor.data.offset ||
       tensor.scales.size > UINT64_MAX - tensor.scales.offset)
     return Error("Tensor row range overflow");
-  std::vector<RowSlice> slices;
+  CacheLineAlignedVector<RowSlice> slices;
   for (uint64_t first = 0; first < rows;) {
     uint64_t count = std::min(rowsPerSlice, rows - first);
     ByteRange data{tensor.data.offset + first * dataStride, count * dataStride};
@@ -272,7 +272,7 @@ struct ModelFile::Impl {
   uint32_t checksum;
   Precision precision;
   std::string manifest;
-  std::vector<TensorRecord> tensors;
+  CacheLineAlignedVector<TensorRecord> tensors;
 };
 
 ModelFile::ModelFile(std::unique_ptr<Impl> impl) : impl(std::move(impl)) {}
@@ -291,7 +291,7 @@ ModelFile::~ModelFile() = default;
 ModelFile::ModelFile(ModelFile &&) noexcept = default;
 ModelFile &ModelFile::operator=(ModelFile &&) noexcept = default;
 
-const std::vector<TensorRecord> &ModelFile::getTensors() const {
+const CacheLineAlignedVector<TensorRecord> &ModelFile::getTensors() const {
   return impl->tensors;
 }
 

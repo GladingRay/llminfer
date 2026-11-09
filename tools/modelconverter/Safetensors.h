@@ -12,7 +12,7 @@ enum class SourceType { BF16, F16, F32 };
 struct SourceTensor {
   const File *file;
   SourceType type;
-  std::vector<uint64_t> shape;
+  CacheLineAlignedVector<uint64_t> shape;
   ByteRange data;
 };
 
@@ -27,7 +27,7 @@ public:
 
 private:
   Safetensors() = default;
-  std::vector<std::unique_ptr<File>> shards;
+  CacheLineAlignedVector<std::unique_ptr<File>> shards;
   std::map<std::string, SourceTensor> tensors;
 };
 

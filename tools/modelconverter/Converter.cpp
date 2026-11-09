@@ -32,8 +32,8 @@ Error convertDense(const SourceTensor &source, const TensorRecord &target,
   unsigned dstSize = target.spec.dtype == DType::F16 ? 2 : 4;
   uint64_t elements = source.data.size / srcSize;
   uint64_t step = std::min(elements, chunkBytes / std::max(srcSize, dstSize));
-  std::vector<uint8_t> input(step * srcSize);
-  std::vector<uint8_t> output(step * dstSize);
+  CacheLineAlignedVector<uint8_t> input(step * srcSize);
+  CacheLineAlignedVector<uint8_t> output(step * dstSize);
   for (uint64_t i = 0; i < elements;) {
     uint64_t count = std::min(step, elements - i);
     if (auto error = source.file->read(
@@ -72,9 +72,9 @@ Error convertQuantized(const SourceTensor &source, const TensorRecord &target,
   uint64_t scaleStride = 2 * groups;
   uint64_t rowsPerChunk =
       std::min(rows, std::max<uint64_t>(1, chunkBytes / inputStride));
-  std::vector<uint8_t> input(rowsPerChunk * inputStride);
-  std::vector<int8_t> output(rowsPerChunk * outputStride);
-  std::vector<uint8_t> scales(rowsPerChunk * scaleStride);
+  CacheLineAlignedVector<uint8_t> input(rowsPerChunk * inputStride);
+  CacheLineAlignedVector<int8_t> output(rowsPerChunk * outputStride);
+  CacheLineAlignedVector<uint8_t> scales(rowsPerChunk * scaleStride);
   std::array<float, weightGroupSize> values;
 
   for (uint64_t row = 0; row < rows;) {
@@ -141,7 +141,7 @@ Error llminfer::convertModel(const std::filesystem::path &sourceDirectory,
       return Error("Unexpected shape for tensor: " + expected.id);
     sourceById.emplace(expected.id, &source->second);
   }
-  std::vector<std::string> skippedTensors;
+  CacheLineAlignedVector<std::string> skippedTensors;
   for (const auto &entry : tensors) {
     std::string_view name = entry.first;
     if (name.substr(0, hfTextPrefix.size()) == hfTextPrefix) {

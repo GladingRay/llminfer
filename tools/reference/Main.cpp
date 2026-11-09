@@ -9,8 +9,8 @@ using namespace llminfer;
 using nlohmann::json;
 
 namespace {
-Result<std::vector<uint32_t>> parseChunk(std::string_view text) {
-  std::vector<uint32_t> ids;
+Result<CacheLineAlignedVector<uint32_t>> parseChunk(std::string_view text) {
+  CacheLineAlignedVector<uint32_t> ids;
   while (true) {
     auto separator = text.find(',');
     auto item = text.substr(0, separator);
@@ -47,7 +47,7 @@ Error run(int argc, char **argv) {
   if (argc < 3)
     return Error("Usage: llmi-reference <fp16.llmi> <token[,token...]>...");
   uint32_t capacity = 0;
-  std::vector<std::vector<uint32_t>> chunks;
+  CacheLineAlignedVector<CacheLineAlignedVector<uint32_t>> chunks;
   for (int i = 2; i < argc; ++i) {
     auto ids = parseChunk(argv[i]);
     if (!ids)

@@ -1,28 +1,28 @@
 #ifndef LLMINFER_MODELS_QWEN35_METALREFERENCEGRAPH_H
 #define LLMINFER_MODELS_QWEN35_METALREFERENCEGRAPH_H
 
+#include "llminfer/Support/CacheLineAlignedVector.h"
 #include "llminfer/Support/Result.h"
 #include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <vector>
 
 namespace llminfer {
 
 struct BlockTrace {
-  std::vector<float> attentionResidual;
-  std::vector<float> swiglu;
-  std::vector<float> output;
+  CacheLineAlignedVector<float> attentionResidual;
+  CacheLineAlignedVector<float> swiglu;
+  CacheLineAlignedVector<float> output;
 };
 
 struct ReferenceTrace {
-  std::vector<float> embedding;
+  CacheLineAlignedVector<float> embedding;
   BlockTrace delta;
   BlockTrace gqa;
-  std::vector<float> convHistory;
-  std::vector<float> recurrentState;
-  std::vector<float> rotatedKeys;
-  std::vector<float> logits;
+  CacheLineAlignedVector<float> convHistory;
+  CacheLineAlignedVector<float> recurrentState;
+  CacheLineAlignedVector<float> rotatedKeys;
+  CacheLineAlignedVector<float> logits;
 };
 
 /// Runs the first DeltaNet layer and first GQA layer on a single sequence.
@@ -37,7 +37,7 @@ public:
 
   /// Appends a nonempty chunk and returns activations and current cache state.
   /// Calls on the same graph must be serialized.
-  Result<ReferenceTrace> step(const std::vector<uint32_t> &tokenIds);
+  Result<ReferenceTrace> step(const CacheLineAlignedVector<uint32_t> &tokenIds);
 
 private:
   struct Impl;
