@@ -26,13 +26,26 @@ add_library(llminfer_model_format
 target_include_directories(llminfer_model_format PUBLIC include)
 target_link_libraries(llminfer_model_format PRIVATE nlohmann_json::nlohmann_json ZLIB::ZLIB)
 
+add_library(llminfer_graph_ir
+  lib/GraphIR/Graph.cpp
+  lib/GraphIR/Cost.cpp
+)
+target_include_directories(llminfer_graph_ir PUBLIC include)
+
+add_library(llminfer_qwen35_builder lib/Models/Qwen35/Qwen35ModelBuilder.cpp)
+target_include_directories(llminfer_qwen35_builder PRIVATE lib/ModelFormat)
+target_link_libraries(llminfer_qwen35_builder
+  PUBLIC llminfer_graph_ir llminfer_model_format
+  PRIVATE nlohmann_json::nlohmann_json)
+
 add_executable(llmi
   tools/modelconverter/Main.cpp
   tools/modelconverter/Converter.cpp
+  tools/modelconverter/GraphCommand.cpp
   tools/modelconverter/Safetensors.cpp
 )
 target_include_directories(llmi PRIVATE lib/ModelFormat)
-target_link_libraries(llmi PRIVATE llminfer_model_format nlohmann_json::nlohmann_json)
+target_link_libraries(llmi PRIVATE llminfer_qwen35_builder nlohmann_json::nlohmann_json)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   enable_language(OBJCXX)
@@ -72,6 +85,9 @@ if(BUILD_TESTING)
   add_executable(cache_line_aligned_vector_test tests/CacheLineAlignedVectorTest.cpp)
   target_include_directories(cache_line_aligned_vector_test PRIVATE include)
   add_test(NAME cache_line_aligned_vector COMMAND cache_line_aligned_vector_test)
+  add_executable(graph_ir_test tests/GraphIRTest.cpp)
+  target_link_libraries(graph_ir_test PRIVATE llminfer_graph_ir)
+  add_test(NAME graph_ir COMMAND graph_ir_test)
   add_executable(model_format_test tests/ModelFormatTest.cpp)
   target_link_libraries(model_format_test PRIVATE llminfer_model_format)
   add_test(NAME model_format COMMAND model_format_test)

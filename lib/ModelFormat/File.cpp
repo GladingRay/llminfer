@@ -24,24 +24,6 @@ Error llminfer::fileError(std::string operation, int errorNumber) {
   return Error(operation + ": " + std::strerror(errorNumber));
 }
 
-bool llminfer::checkedAdd(uint64_t lhs, uint64_t rhs, uint64_t &result) {
-  if (rhs > UINT64_MAX - lhs)
-    return false;
-  result = lhs + rhs;
-  return true;
-}
-
-bool llminfer::checkedMul(uint64_t lhs, uint64_t rhs, uint64_t &result) {
-  if (lhs != 0 && rhs > UINT64_MAX / lhs)
-    return false;
-  result = lhs * rhs;
-  return true;
-}
-
-bool llminfer::alignTo(uint64_t value, uint64_t alignment, uint64_t &result) {
-  return checkedAdd(value, (alignment - value % alignment) % alignment, result);
-}
-
 uint64_t llminfer::readLittleEndian(const uint8_t *bytes, unsigned size) {
   uint64_t result = 0;
   for (unsigned i = 0; i < size; ++i)

@@ -1,4 +1,5 @@
 #include "Converter.h"
+#include "GraphCommand.h"
 #include "Qwen35Schema.h"
 #include <cstdlib>
 #include <iostream>
@@ -12,7 +13,9 @@ void printUsage(std::ostream &out) {
   out << "Usage:\n"
       << "  llmi convert <model-directory> <output.llmi> [--precision "
          "w8a8|f16]\n"
-      << "  llmi inspect <model.llmi> [--tensor <id>] [--json]\n";
+      << "  llmi inspect <model.llmi> [--tensor <id>] [--json]\n"
+      << "  llmi graph <model.llmi> [--tokens T] [--past P] [--capacity N] "
+         "[--logits none|last|all] [--json]\n";
 }
 
 json describeTensor(const TensorRecord &tensor) {
@@ -126,6 +129,9 @@ int run(int argc, char **argv) {
     }
     return report(inspect(argv[2], tensor, printJson));
   }
+
+  if (argc >= 3 && std::string_view(argv[1]) == "graph")
+    return report(describeGraph(argc, argv));
 
   printUsage(std::cerr);
   return EXIT_FAILURE;

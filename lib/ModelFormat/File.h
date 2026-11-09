@@ -2,13 +2,11 @@
 #define LLMINFER_MODELFORMAT_FILE_H
 
 #include "llminfer/ModelFormat/ModelFile.h"
+#include "llminfer/Support/CheckedArithmetic.h"
 
 namespace llminfer {
 
 Error fileError(std::string operation, int errorNumber);
-bool checkedAdd(uint64_t lhs, uint64_t rhs, uint64_t &result);
-bool checkedMul(uint64_t lhs, uint64_t rhs, uint64_t &result);
-bool alignTo(uint64_t value, uint64_t alignment, uint64_t &result);
 uint64_t readLittleEndian(const uint8_t *bytes, unsigned size);
 void writeLittleEndian(uint8_t *bytes, uint64_t value, unsigned size);
 

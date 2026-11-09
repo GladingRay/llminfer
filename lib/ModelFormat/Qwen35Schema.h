@@ -11,6 +11,20 @@ inline constexpr std::string_view embeddingId = "embed_tokens.weight";
 inline constexpr std::string_view headId = "lm_head.weight";
 inline constexpr std::string_view hfTextPrefix = "model.language_model.";
 
+enum class Qwen35LayerKind { DeltaNet, Gqa };
+
+struct Qwen35TextConfig {
+  uint64_t hidden, intermediate, vocabulary, maxPositions;
+  uint64_t headDim, qHeads, kvHeads, queryWidth, kvWidth, rotaryWidth;
+  uint64_t keyHeads, valueHeads, keyDim, valueDim, convKernel;
+  uint64_t linearKeyWidth, linearValueWidth, linearQkvWidth;
+  double epsilon, theta;
+  CacheLineAlignedVector<Qwen35LayerKind> layers;
+};
+
+Result<Qwen35TextConfig>
+getQwen35TextConfig(const nlohmann::json &sourceConfig);
+
 struct ModelSchema {
   Precision precision;
   CacheLineAlignedVector<TensorSpec> tensors;

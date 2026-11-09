@@ -110,7 +110,7 @@ y     = qᵀ S1
 
 ## 5. GraphIR、执行计划与会话状态
 
-**GraphIR** 是有序 SSA 数据流。`ValueDesc` 包含 dtype、逻辑形状和布局约束，`Op` 包含类型、输入输出、强类型属性和 layer ID。权重使用 `TensorId`，运行时维度只包含输入 token 数 `T` 和已有前缀 `P`。对 `KvAppend`、`CausalConv1d` 和 `DeltaUpdate` 显式记录状态 slot 及读写范围或状态版本。图验证器检查 dtype、shape、use-def、别名和状态顺序。`Qwen35GraphBuilder` 负责将模型算子编码进 GraphIR。
+**GraphIR** 是有序 SSA 数据流。`ValueDesc` 包含 dtype、逻辑形状和元素步幅，`Operation` 包含类型、输入输出、强类型属性和 layer ID。`Qwen35ModelBuilder` 从 `.llmi` 的配置和 `TensorId` 构建完整文本主干。每张图以本次 token 数 `T`、已有前缀 `P` 和会话容量为参数，记录具体形状。图在追加算子时检查类型、形状、定义顺序、视图和状态版本。对 `KvAppend`、`CausalGqa`、`CausalConv1d` 和 `DeltaUpdate` 显式记录状态 slot、读写区间和前后版本。
 
 `QuantizeActivation` 产生一对 SSA 值，分别表示 INT8 数据和 FP32 scale。`LinearW8A8` 显式消费这对值及量化权重，验证器检查逻辑 K、分组大小和 scale 形状。共享同一输入的 Q/K/V、DeltaNet 的 qkv/z/a/b、MLP 的 gate/up 各复用一次量化，输入不同的输出投影和 down 投影单独量化。Metal 后端可融合 norm 与量化，或在 GEMM tile 内量化。只有在融合后实际省去全局缓冲区访问时，执行成本才扣除相应流量。
 
@@ -139,6 +139,8 @@ y     = qᵀ S1
 | GPU 实测 | Command buffer 时间戳和设备支持的 Metal 计数器 | GPU 时间及可用硬件指标。实际 DRAM 字节仅在有对应计数器时提供，其他设备标记为不可用。按需开启 dispatch 采样，避免采样影响常规性能基准。 |
 
 典型算子的计数规则如下。`T` 是本次实际 token 数，`P` 是已有前缀长度，`L=P+T`，`G=ceil(K/32)`。
+
+`llmi graph` 报告模型语义成本。切片和 reshape 视图自身计零访存，消费者按逻辑元素数读取。Embedding 查表按每个 token 一行估算，权重 scale 和激活 scale 单独纳入字节数。
 
 - `QuantizeActivation(T×K)` 逻辑读 `2×T×K` 字节 FP16 输入，逻辑写 `T×K + 4×T×G` 字节 INT8 数据与 FP32 scale。绝对值、最大值归约、scale 计算、舍入和截断计入各自的运算项。共享量化结果只计一次写出，各消费者分别计读取。
 - `LinearW8A8(T×K, N×K)` 为 `T×N×K` INT8 MAC。逻辑读量包括 `T×K + 4×T×G` 字节激活及其 scale、`N×K + 2×N×G` 字节权重及其 scale。逻辑写量为 `2×T×N` 字节 FP16 输出。另计 FP32 分组缩放和合并，执行估算计入 `Kpad` 和各 tile 的读取次数。输出投影及其量化将 `T` 换成实际请求的 logits 行数。

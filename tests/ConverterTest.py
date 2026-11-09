@@ -130,6 +130,56 @@ def write_checkpoint(directory, *, invalid_weight=False):
     (directory / "model.safetensors.index.json").write_text(json.dumps(index))
 
 
+def test_graph(w8_model, dense_model):
+    graph = json.loads(run(
+        "graph", w8_model, "--tokens", "3", "--past", "2", "--capacity", "8", "--json"
+    ))
+    assert graph["step"] == {"tokens": 3, "past": 2, "capacity": 8}
+    assert len(graph["states"]) == 4
+    assert graph["values"][graph["outputs"][0]]["shape"] == [1, 5]
+    ops = graph["ops"]
+    assert {op["layer"] for op in ops if "layer" in op} == {0, 1}
+    embed = ops[0]
+    head = ops[-1]
+    assert embed["kind"] == "EmbeddingGather" and head["kind"] == "LinearW8A8"
+    assert embed["inputs"][1] == head["inputs"][2]
+
+    delta_quant = next(op for op in ops if op["kind"] == "QuantizeActivation")
+    projections = [
+        op for op in ops if op["kind"] == "LinearW8A8" and
+        op["inputs"][:2] == delta_quant["outputs"]
+    ]
+    assert len(projections) == 4
+    assert delta_quant["cost"]["logical_write_bytes"] == 123
+
+    kv = next(op for op in ops if op["kind"] == "KvAppend")
+    gqa = next(op for op in ops if op["kind"] == "CausalGqa")
+    delta = next(op for op in ops if op["kind"] == "DeltaUpdate")
+    assert kv["cost"]["logical_write_bytes"] == 96
+    assert gqa["cost"]["logical_read_bytes"] == 256
+    assert gqa["cost"]["fp_macs"] == 384
+    assert delta["cost"]["fp_macs"] == 288
+    assert all(
+        e["begin"] == 2 and e["length"] == 3 and e["version_after"] == 1
+        for e in kv["effects"]
+    )
+    assert all(
+        e["begin"] == 0 and e["length"] == 5 and e["version_before"] == 1
+        for e in gqa["effects"]
+    )
+
+    dense = json.loads(run("graph", dense_model, "--tokens", "3", "--logits", "all", "--json"))
+    assert dense["values"][dense["outputs"][0]]["shape"] == [3, 5]
+    assert dense["cost"]["int8_macs"] == 0 and dense["cost"]["fp_macs"] > 0
+    assert not any(op["kind"] == "QuantizeActivation" for op in dense["ops"])
+
+    no_logits = json.loads(run("graph", w8_model, "--logits", "none", "--json"))
+    assert not no_logits["outputs"]
+    assert len(no_logits["states"]) == 4
+    run("graph", w8_model, "--tokens", "0", error="Invalid graph step")
+    run("graph", w8_model, "--capacity", "129", error="exceeds the model context")
+
+
 def test_conversion(directory):
     write_checkpoint(directory)
     first = directory / "first.llmi"
@@ -179,6 +229,8 @@ def test_conversion(directory):
     assert struct.unpack_from("<5e", dense.read_bytes(), dense_tensor["data"]["offset"]) == (
         127.0, -127.0, 2.5, -1.5, 0.5
     )
+
+    test_graph(first, dense)
 
     bad = directory / "bad.llmi"
     bad.write_bytes(data[:-1])

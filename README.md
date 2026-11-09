@@ -24,6 +24,17 @@ build/llmi inspect build/qwen3.5-4b.llmi --tensor lm_head.weight --json
 
 转换默认保存每 32 个元素一组的 INT8 投影权重和 FP16 scale。加 `--precision f16` 可生成对拍用的未量化版本。输出头和 embedding 共用一份权重。`inspect` 会验证文件结构和 CRC32，也可以报告指定张量的数据及 scale 区间。
 
+## Qwen3.5 GraphIR
+
+`llmi graph` 从已转换的 FP16 或 W8A8 模型构建完整文本主干。`--tokens` 指定本次输入长度，`--past` 指定已处理长度。默认 cache 容量为两者之和，可用 `--capacity` 指定。`--logits` 支持 `last`（默认）、`all` 和 `none`。
+
+```sh
+build/llmi graph build/qwen3.5-4b.llmi --tokens 16 --past 64 --capacity 4096
+build/llmi graph build/qwen3.5-4b.llmi --tokens 1 --past 80 --json
+```
+
+摘要列出计算量和逻辑读写字节。`--json` 还会输出每个 SSA 值的形状和步幅、算子属性、状态读写区间与版本，以及逐算子成本。
+
 ## FP16 Metal 参考图
 
 macOS 构建提供 `llmi-reference`。它从 `.llmi` 载入首个 DeltaNet 层和首个 GQA 层，以共享 embedding 和输出头连接两层。每个 token 参数代表一个 chunk，命令在同一个会话内依次执行，逐 chunk 输出包含中间结果和 cache 的 JSON 行。

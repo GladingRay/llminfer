@@ -19,8 +19,7 @@ double number(const json &value) {
   return value.is_number() ? value.get<double>() : 0.0;
 }
 
-Result<CacheLineAlignedVector<TensorSpec>> getTextTensors(const json &config,
-                                                          Precision precision) {
+Result<Qwen35TextConfig> parseTextConfig(const json &config) {
   if (auto error = require(config, "model_type", "qwen3_5"))
     return error;
   if (auto error = require(config, "tie_word_embeddings", true))
@@ -97,42 +96,80 @@ Result<CacheLineAlignedVector<TensorSpec>> getTextTensors(const json &config,
   if (!layers.is_array() || layers.size() != layerCount || layerCount > 1024)
     return Error("Invalid layer_types array");
 
+  CacheLineAlignedVector<Qwen35LayerKind> layerKinds;
+  for (const auto &layer : layers) {
+    if (layer == "linear_attention")
+      layerKinds.push_back(Qwen35LayerKind::DeltaNet);
+    else if (layer == "full_attention")
+      layerKinds.push_back(Qwen35LayerKind::Gqa);
+    else
+      return Error("Unsupported layer type at layer " +
+                   std::to_string(layerKinds.size()));
+  }
+  return Qwen35TextConfig{hidden,
+                          intermediate,
+                          vocabulary,
+                          maxPositions,
+                          headDim,
+                          qHeads,
+                          kvHeads,
+                          query,
+                          keyValue,
+                          static_cast<uint64_t>(rotaryWidth),
+                          keyHeads,
+                          valueHeads,
+                          linearKeyDim,
+                          linearValueDim,
+                          convKernel,
+                          linearKey,
+                          linearValue,
+                          linearQkv,
+                          number(getField(text, "rms_norm_eps")),
+                          number(getField(rope, "rope_theta")),
+                          std::move(layerKinds)};
+}
+
+CacheLineAlignedVector<TensorSpec> getTextTensors(const Qwen35TextConfig &c,
+                                                  Precision precision) {
   DType matrix = precision == Precision::W8A8 ? DType::I8 : DType::F16;
   CacheLineAlignedVector<TensorSpec> tensors;
-  tensors.push_back({std::string(embeddingId), {vocabulary, hidden}, matrix});
-  tensors.push_back({"norm.weight", {hidden}, DType::F32});
+  tensors.push_back(
+      {std::string(embeddingId), {c.vocabulary, c.hidden}, matrix});
+  tensors.push_back({"norm.weight", {c.hidden}, DType::F32});
 
-  for (size_t i = 0; i < layers.size(); ++i) {
+  for (size_t i = 0; i < c.layers.size(); ++i) {
     const std::string prefix = "layers." + std::to_string(i) + ".";
     auto add = [&](std::string_view name,
                    CacheLineAlignedVector<uint64_t> shape, DType dtype) {
       tensors.push_back({prefix + std::string(name), std::move(shape), dtype});
     };
-    add("input_layernorm.weight", {hidden}, DType::F32);
-    add("post_attention_layernorm.weight", {hidden}, DType::F32);
-    add("mlp.gate_proj.weight", {intermediate, hidden}, matrix);
-    add("mlp.up_proj.weight", {intermediate, hidden}, matrix);
-    add("mlp.down_proj.weight", {hidden, intermediate}, matrix);
+    add("input_layernorm.weight", {c.hidden}, DType::F32);
+    add("post_attention_layernorm.weight", {c.hidden}, DType::F32);
+    add("mlp.gate_proj.weight", {c.intermediate, c.hidden}, matrix);
+    add("mlp.up_proj.weight", {c.intermediate, c.hidden}, matrix);
+    add("mlp.down_proj.weight", {c.hidden, c.intermediate}, matrix);
 
-    if (layers[i] == "linear_attention") {
-      add("linear_attn.in_proj_qkv.weight", {linearQkv, hidden}, matrix);
-      add("linear_attn.in_proj_z.weight", {linearValue, hidden}, matrix);
-      add("linear_attn.in_proj_a.weight", {valueHeads, hidden}, matrix);
-      add("linear_attn.in_proj_b.weight", {valueHeads, hidden}, matrix);
-      add("linear_attn.out_proj.weight", {hidden, linearValue}, matrix);
-      add("linear_attn.conv1d.weight", {linearQkv, 1, convKernel}, DType::F16);
-      add("linear_attn.norm.weight", {linearValueDim}, DType::F32);
-      add("linear_attn.A_log", {valueHeads}, DType::F32);
-      add("linear_attn.dt_bias", {valueHeads}, DType::F32);
-    } else if (layers[i] == "full_attention") {
-      add("self_attn.q_proj.weight", {gatedQuery, hidden}, matrix);
-      add("self_attn.k_proj.weight", {keyValue, hidden}, matrix);
-      add("self_attn.v_proj.weight", {keyValue, hidden}, matrix);
-      add("self_attn.o_proj.weight", {hidden, query}, matrix);
-      add("self_attn.q_norm.weight", {headDim}, DType::F32);
-      add("self_attn.k_norm.weight", {headDim}, DType::F32);
+    if (c.layers[i] == Qwen35LayerKind::DeltaNet) {
+      add("linear_attn.in_proj_qkv.weight", {c.linearQkvWidth, c.hidden},
+          matrix);
+      add("linear_attn.in_proj_z.weight", {c.linearValueWidth, c.hidden},
+          matrix);
+      add("linear_attn.in_proj_a.weight", {c.valueHeads, c.hidden}, matrix);
+      add("linear_attn.in_proj_b.weight", {c.valueHeads, c.hidden}, matrix);
+      add("linear_attn.out_proj.weight", {c.hidden, c.linearValueWidth},
+          matrix);
+      add("linear_attn.conv1d.weight", {c.linearQkvWidth, 1, c.convKernel},
+          DType::F16);
+      add("linear_attn.norm.weight", {c.valueDim}, DType::F32);
+      add("linear_attn.A_log", {c.valueHeads}, DType::F32);
+      add("linear_attn.dt_bias", {c.valueHeads}, DType::F32);
     } else {
-      return Error("Unsupported layer type at layer " + std::to_string(i));
+      add("self_attn.q_proj.weight", {2 * c.queryWidth, c.hidden}, matrix);
+      add("self_attn.k_proj.weight", {c.kvWidth, c.hidden}, matrix);
+      add("self_attn.v_proj.weight", {c.kvWidth, c.hidden}, matrix);
+      add("self_attn.o_proj.weight", {c.hidden, c.queryWidth}, matrix);
+      add("self_attn.q_norm.weight", {c.headDim}, DType::F32);
+      add("self_attn.k_norm.weight", {c.headDim}, DType::F32);
     }
   }
 
@@ -143,6 +180,11 @@ Result<CacheLineAlignedVector<TensorSpec>> getTextTensors(const json &config,
   return tensors;
 }
 } // namespace
+
+Result<Qwen35TextConfig>
+llminfer::getQwen35TextConfig(const json &sourceConfig) {
+  return parseTextConfig(sourceConfig);
+}
 
 const json &llminfer::getField(const json &object, std::string_view key) {
   static const json missing;
@@ -237,10 +279,10 @@ Result<ModelSchema> llminfer::getModelSchema(std::string_view manifest) {
                    [](const json &name) { return name.is_string(); }))
     return Error("Invalid skipped_tensors array");
 
-  auto tensors = getTextTensors(getField(*root, "source_config"), precision);
-  if (!tensors)
-    return tensors.getError();
-  return ModelSchema{precision, std::move(*tensors)};
+  auto config = getQwen35TextConfig(getField(*root, "source_config"));
+  if (!config)
+    return config.getError();
+  return ModelSchema{precision, getTextTensors(*config, precision)};
 }
 
 std::string llminfer::makeManifest(
