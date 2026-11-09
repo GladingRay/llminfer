@@ -40,7 +40,7 @@ flowchart LR
 
 1. 读取 `config.json` 和 `model.safetensors.index.json`。按索引定位分片，校验必需张量的名称、形状、dtype、偏移和长度。逐张量分块转换，以行块为单位控制峰值内存。
 2. 将 HF 名称映射为稳定的 `TensorId`，由转换器和建图器共享 schema。按 `layer_types` 生成预期权重清单。本地检查点没有单独的 `lm_head.weight`，文件中保留一份 `embed_tokens.weight`，供 embedding gather 和输出投影共同引用。对无法识别的文本权重或不受支持的模型变体报错。
-3. 所有线性投影（包括 `in_proj_a/b`）的权重采用逐输出行、沿输入维 K 每 64 个元素一组的对称量化。`scale` 使用 FP16 保存，量化时使用同一已舍入的 scale。卷积权重使用 FP16。Norm 权重、`A_log` 和 `dt_bias` 保留为 FP32。可用同一容器保存未量化的 FP16 矩阵作为对拍路径。
+3. 所有线性投影（包括 `in_proj_a/b`）的权重采用逐输出行、沿输入维 K 每 32 个元素一组的对称量化。`scale` 使用 FP16 保存，量化时使用同一已舍入的 scale。卷积权重使用 FP16。Norm 权重、`A_log` 和 `dt_bias` 保留为 FP32。可用同一容器保存未量化的 FP16 矩阵作为对拍路径。
 4. 写临时文件，校验目录和 payload 后原子替换目标。记录源配置、量化版本、各 dtype 大小和跳过项。Tokenizer 和模板保留为 HF 原始旁车文件，由接入层读取。
 
 ```text
@@ -50,7 +50,7 @@ q      = clamp(roundEven(w / fp32(scale)), -127, 127)
 w_hat  = fp32(q) * fp32(scale)
 ```
 
-全零组使用 `scale=1, q=0`，尾组补零，非有限权重和转换后溢出均报错。`RowMajorI8Group64` 的字节布局为连续 `int8[N, Kpad]` 和独立的 `fp16[N, Kpad/64]` scale 区。Embedding 只解量化所选行。后续 tile packing 使用独立 `layoutId`。
+全零组使用 `scale=1, q=0`，尾组补零，非有限权重和转换后溢出均报错。`RowMajorI8Group32` 的字节布局为连续 `int8[N, Kpad]` 和独立的 `fp16[N, Kpad/32]` scale 区，其中 `Kpad=32×ceil(K/32)`。Embedding 只解量化所选行。后续 tile packing 使用独立 `layoutId`。
 
 `.llmi` v1 由固定小端文件头、UTF-8 JSON 配置、tensor 目录和对齐的数据区构成。文件头记录 magic、版本、架构 ID、各区间的 64 位偏移和长度。目录记录 `TensorId`、逻辑形状、存储形状、dtype、`layoutId`、数据和 scale 区间。配置记录 W8A8 的量化规格及其版本。动态激活及其 scale 由 GPU 在运行时生成，存放于临时 arena。存储项使用固定字段编码，避免依赖 C++ struct 内存布局。Loader 在分配前检查版本、整数溢出、范围重叠、对齐、类型和模型配置一致性。
 
@@ -60,14 +60,14 @@ Loader 按行切分超长矩阵并在执行计划中保留行范围。输出投�
 
 ### W8A8 投影
 
-`QuantizeActivation` 对每个 token 沿 K 每 64 个元素单独做动态对称量化，与权重分组对齐。每组用 FP32 求绝对值最大值，`sA=max(abs(x))/127`，`qA=clamp(roundEven(x/sA), -127, 127)`。全零组使用 `sA=1, qA=0`，尾组补零。对 `[T,K]` 输入，输出 `int8[T,Kpad]` 和 `fp32[T,Kpad/64]`。动态 scale 无需离线校准数据，prefill 和 decode 使用同一规则。
+`QuantizeActivation` 对每个 token 沿 K 每 32 个元素单独做动态对称量化，与权重分组对齐。每组用 FP32 求绝对值最大值，`sA=max(abs(x))/127`，`qA=clamp(roundEven(x/sA), -127, 127)`。全零组使用 `sA=1, qA=0`，尾组补零。对 `[T,K]` 输入，输出 `int8[T,Kpad]` 和 `fp32[T,Kpad/32]`。动态 scale 无需离线校准数据，prefill 和 decode 使用同一规则。
 
 ```text
 partial[t,n,g] = sum_k_in_g(int32(qA[t,k]) * int32(qW[n,k]))
 y[t,n] = fp16(sum_g(fp32(partial[t,n,g]) * sA[t,g] * fp32(sW[n,g])))
 ```
 
-每组 INT32 点积的绝对值上界为 `64×127²=1,032,256`。各组 scale 不同，必须按组乘回 scale 后再做 FP32 求和。Metal 基线将 INT8 向量加载后拓宽为 INT32，做整数乘加和归约。分别实现 decode 的 GEMV 与 prefill 的分块 GEMM 变体。原生低精度指令的可用性和收益按目标设备实测，基线依赖通用整数运算。[Apple Metal 类型](https://developer.apple.com/documentation/metal/mtldatatype) · [Apple SIMD 执行宽度](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
+每组 INT32 点积的绝对值上界为 `32×127²=516,128`。各组 scale 不同，必须按组乘回 scale 后再做 FP32 求和。Metal 基线将 INT8 向量加载后拓宽为 INT32，做整数乘加和归约。分别实现 decode 的 GEMV 与 prefill 的分块 GEMM 变体。原生低精度指令的可用性和收益按目标设备实测，基线依赖通用整数运算。[Apple Metal 类型](https://developer.apple.com/documentation/metal/mtldatatype) · [Apple SIMD 执行宽度](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
 
 ### 模型算子与状态
 
@@ -113,7 +113,7 @@ y     = qᵀ S1
 | DeltaNet 递归状态 | 每层 `[32,128,128]` FP32，共 48 MiB。可按 V 维分 tile，物理布局由 Metal 后端选择。 |
 | DeltaNet 卷积历史 | 每层 `3×8192` 个 FP16 元素，共 1.125 MiB。首 token 左侧补零，跨 chunk 延续历史。 |
 
-按本地张量形状计算，所有 W8 投影权重、共享 embedding 和 scale 约占 **4.34 GB**，另计其他浮点权重、对齐、临时区和运行时状态。配置的 262144 token 仅 KV cache 就需要 8 GiB。加载时按实际设备的单 buffer 限制和工作集预算计算可用容量，并把活跃 KV、已分配 KV 和临时 arena 峰值分别报告。[Apple Metal 工作集预算](https://developer.apple.com/documentation/metal/mtldevice/recommendedmaxworkingsetsize?changes=__1)
+按本地张量形状计算，所有 W8 投影权重、共享 embedding 和 scale 约占 **4.47 GB**，另计其他浮点权重、对齐、临时区和运行时状态。配置的 262144 token 仅 KV cache 就需要 8 GiB。加载时按实际设备的单 buffer 限制和工作集预算计算可用容量，并把活跃 KV、已分配 KV 和临时 arena 峰值分别报告。[Apple Metal 工作集预算](https://developer.apple.com/documentation/metal/mtldevice/recommendedmaxworkingsetsize?changes=__1)
 
 ## 6. 计算量、访存量和性能报告
 
@@ -123,7 +123,7 @@ y     = qᵀ S1
 | 执行计划估算 | Metal kernel 变体、dispatch 几何、实际存储布局 | `estimatedGlobalReadBytes` 和 `estimatedGlobalWriteBytes`，按 tile 访问模型计入 padding、scale、工作组重复读取、状态写回、临时区和拷贝。融合消除的中间读写从此处移除。缺少模型的 dispatch 标记为未知。 |
 | GPU 实测 | Command buffer 时间戳和设备支持的 Metal 计数器 | GPU 时间及可用硬件指标。实际 DRAM 字节仅在有对应计数器时提供，其他设备标记为不可用。按需开启 dispatch 采样，避免采样影响常规性能基准。 |
 
-典型算子的计数规则如下。`T` 是本次实际 token 数，`P` 是已有前缀长度，`L=P+T`，`G=ceil(K/64)`。
+典型算子的计数规则如下。`T` 是本次实际 token 数，`P` 是已有前缀长度，`L=P+T`，`G=ceil(K/32)`。
 
 - `QuantizeActivation(T×K)` 逻辑读 `2×T×K` 字节 FP16 输入，逻辑写 `T×K + 4×T×G` 字节 INT8 数据与 FP32 scale。绝对值、最大值归约、scale 计算、舍入和截断计入各自的运算项。共享量化结果只计一次写出，各消费者分别计读取。
 - `LinearW8A8(T×K, N×K)` 为 `T×N×K` INT8 MAC。逻辑读量包括 `T×K + 4×T×G` 字节激活及其 scale、`N×K + 2×N×G` 字节权重及其 scale。逻辑写量为 `2×T×N` 字节 FP16 输出。另计 FP32 分组缩放和合并，执行估算计入 `Kpad` 和各 tile 的读取次数。输出投影及其量化将 `T` 换成实际请求的 logits 行数。
