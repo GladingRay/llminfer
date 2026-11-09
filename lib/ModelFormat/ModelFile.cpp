@@ -4,9 +4,10 @@
 #include "llminfer/ModelFormat/Quantization.h"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <unistd.h>
 #include <zlib.h>
 
 using namespace llminfer;
@@ -33,7 +34,7 @@ uint64_t dtypeSize(DType dtype) {
   case DType::F32:
     return 4;
   }
-  fail("Invalid tensor dtype");
+  return 0;
 }
 
 struct FilePlan {
@@ -42,38 +43,49 @@ struct FilePlan {
   ByteRange payload;
   std::vector<TensorRecord> tensors;
 
-  uint64_t size() const { return checkedAdd(payload.offset, payload.size); }
+  uint64_t size() const { return payload.offset + payload.size; }
 };
 
-ByteRange reserveRange(uint64_t &cursor, uint64_t bytes) {
-  ByteRange range{alignTo(cursor, alignment), bytes};
-  cursor = checkedAdd(range.offset, range.size);
-  return range;
+bool reserveRange(uint64_t &cursor, uint64_t bytes, ByteRange &range) {
+  if (!alignTo(cursor, alignment, range.offset) ||
+      !checkedAdd(range.offset, bytes, cursor))
+    return false;
+  range.size = bytes;
+  return true;
 }
 
-FilePlan planFile(uint64_t manifestSize, const std::vector<TensorSpec> &specs) {
+Result<FilePlan> planFile(uint64_t manifestSize,
+                          const std::vector<TensorSpec> &specs) {
   if (manifestSize == 0 || manifestSize > maxManifestSize)
-    fail("Invalid .llmi manifest size");
+    return Error("Invalid .llmi manifest size");
   FilePlan plan;
   plan.manifest = {headerSize, manifestSize};
-  uint64_t cursor = checkedAdd(headerSize, manifestSize);
-  plan.directory = reserveRange(cursor, checkedMul(specs.size(), entrySize));
-  plan.payload.offset = alignTo(cursor, alignment);
+  uint64_t cursor = headerSize + manifestSize;
+  uint64_t directoryBytes;
+  if (!checkedMul(specs.size(), entrySize, directoryBytes) ||
+      !reserveRange(cursor, directoryBytes, plan.directory) ||
+      !alignTo(cursor, alignment, plan.payload.offset))
+    return Error(".llmi directory size overflow");
 
   for (const auto &spec : specs) {
     TensorRecord tensor{spec, Layout::Dense, spec.shape, {}, {}};
     if (spec.dtype == DType::I8) {
       tensor.layout = Layout::RowMajorI8Group32;
-      tensor.storageShape[1] = alignTo(spec.shape[1], weightGroupSize);
+      if (!alignTo(spec.shape[1], weightGroupSize, tensor.storageShape[1]))
+        return Error("Padded tensor width overflow: " + spec.id);
     }
     uint64_t bytes = dtypeSize(spec.dtype);
     for (uint64_t dim : tensor.storageShape)
-      bytes = checkedMul(bytes, dim);
-    tensor.data = reserveRange(cursor, bytes);
+      if (!checkedMul(bytes, dim, bytes))
+        return Error("Tensor size overflow: " + spec.id);
+    if (!reserveRange(cursor, bytes, tensor.data))
+      return Error("Tensor offset overflow: " + spec.id);
     if (tensor.layout == Layout::RowMajorI8Group32) {
-      uint64_t groups = tensor.storageShape[1] / weightGroupSize;
-      tensor.scales = reserveRange(
-          cursor, checkedMul(2, checkedMul(spec.shape[0], groups)));
+      uint64_t scaleStride = 2 * (tensor.storageShape[1] / weightGroupSize);
+      uint64_t scaleBytes;
+      if (!checkedMul(spec.shape[0], scaleStride, scaleBytes) ||
+          !reserveRange(cursor, scaleBytes, tensor.scales))
+        return Error("Tensor scale range overflow: " + spec.id);
     }
     plan.tensors.push_back(std::move(tensor));
   }
@@ -99,11 +111,10 @@ Header encodeHeader(const FilePlan &plan, uint32_t checksum) {
 
 Entry encodeEntry(const TensorRecord &tensor) {
   Entry entry{};
-  if (tensor.spec.id.size() >= idSize || tensor.spec.shape.size() > 3)
-    fail("Tensor exceeds directory entry capacity");
+  assert(tensor.spec.id.size() < idSize && tensor.spec.shape.size() <= 3);
   std::copy(tensor.spec.id.begin(), tensor.spec.id.end(), entry.begin());
-  writeLittleEndian(entry.data() + 96, static_cast<uint32_t>(tensor.spec.dtype),
-                    4);
+  writeLittleEndian(entry.data() + idSize,
+                    static_cast<uint32_t>(tensor.spec.dtype), 4);
   writeLittleEndian(entry.data() + 100, static_cast<uint32_t>(tensor.layout),
                     4);
   writeLittleEndian(entry.data() + 104, tensor.spec.shape.size(), 4);
@@ -118,13 +129,14 @@ Entry encodeEntry(const TensorRecord &tensor) {
   return entry;
 }
 
-uint32_t checksumFile(const File &file, uint64_t size) {
+Result<uint32_t> checksumFile(const File &file, uint64_t size) {
   std::vector<uint8_t> buffer(1 << 20);
   uLong checksum = crc32(0, Z_NULL, 0);
   for (uint64_t offset = headerSize; offset < size;) {
     auto count =
         static_cast<uInt>(std::min<uint64_t>(size - offset, buffer.size()));
-    file.read({offset, count}, buffer.data());
+    if (auto error = file.read({offset, count}, buffer.data()))
+      return error;
     checksum = crc32(checksum, buffer.data(), count);
     offset += count;
   }
@@ -137,6 +149,15 @@ bool contains(ByteRange outer, ByteRange inner) {
   uint64_t relative = inner.offset - outer.offset;
   return relative <= outer.size && inner.size <= outer.size - relative;
 }
+struct TemporaryPath {
+  std::string path;
+  bool removeOnExit = false;
+
+  ~TemporaryPath() {
+    if (removeOnExit)
+      ::unlink(path.c_str());
+  }
+};
 } // namespace
 
 std::string_view llminfer::getDTypeName(DType dtype) {
@@ -148,7 +169,7 @@ std::string_view llminfer::getDTypeName(DType dtype) {
   case DType::F32:
     return "F32";
   }
-  fail("Invalid tensor dtype");
+  return "Unknown";
 }
 
 std::string_view llminfer::getLayoutName(Layout layout) {
@@ -158,31 +179,33 @@ std::string_view llminfer::getLayoutName(Layout layout) {
   case Layout::RowMajorI8Group32:
     return "RowMajorI8Group32";
   }
-  fail("Invalid tensor layout");
+  return "Unknown";
 }
 
-std::vector<RowSlice> llminfer::splitRows(const TensorRecord &tensor,
-                                          uint64_t maxBufferLength) {
+Result<std::vector<RowSlice>> llminfer::splitRows(const TensorRecord &tensor,
+                                                  uint64_t maxBufferLength) {
   if (tensor.spec.shape.size() != 2 || tensor.spec.shape[0] == 0)
-    fail("Row slicing requires a nonempty rank-two tensor");
+    return Error("Row slicing requires a nonempty rank-two tensor");
   uint64_t rows = tensor.spec.shape[0];
   if (tensor.data.size == 0 || tensor.data.size % rows ||
       tensor.scales.size % rows)
-    fail("Invalid tensor row storage");
+    return Error("Invalid tensor row storage");
   uint64_t dataStride = tensor.data.size / rows;
   uint64_t scaleStride = tensor.scales.size / rows;
   uint64_t rowsPerSlice = maxBufferLength / std::max(dataStride, scaleStride);
   if (rowsPerSlice == 0)
-    fail("Tensor row exceeds maximum buffer length");
+    return Error("Tensor row exceeds maximum buffer length");
 
+  if (tensor.data.size > UINT64_MAX - tensor.data.offset ||
+      tensor.scales.size > UINT64_MAX - tensor.scales.offset)
+    return Error("Tensor row range overflow");
   std::vector<RowSlice> slices;
   for (uint64_t first = 0; first < rows;) {
     uint64_t count = std::min(rowsPerSlice, rows - first);
-    ByteRange data{checkedAdd(tensor.data.offset, first * dataStride),
-                   count * dataStride};
+    ByteRange data{tensor.data.offset + first * dataStride, count * dataStride};
     ByteRange scales;
     if (scaleStride)
-      scales = {checkedAdd(tensor.scales.offset, first * scaleStride),
+      scales = {tensor.scales.offset + first * scaleStride,
                 count * scaleStride};
     slices.push_back({first, count, data, scales});
     first += count;
@@ -191,41 +214,57 @@ std::vector<RowSlice> llminfer::splitRows(const TensorRecord &tensor,
 }
 
 struct ModelFile::Impl {
-  explicit Impl(const std::filesystem::path &path) : file(path) {
-    size = file.getSize();
+  explicit Impl(File file) : file(std::move(file)) {}
+
+  Error validate() {
+    auto fileSize = file.getSize();
+    if (!fileSize)
+      return fileSize.getError();
+    size = *fileSize;
     Header header;
-    file.read({0, header.size()}, header.data());
+    if (auto error = file.read({0, header.size()}, header.data()))
+      return error;
     if (!std::equal(magic.begin(), magic.end(), header.begin()))
-      fail("Invalid .llmi magic");
+      return Error("Invalid .llmi magic");
     if (readLittleEndian(header.data() + 8, 4) != formatVersion)
-      fail("Unsupported .llmi version");
+      return Error("Unsupported .llmi version");
     if (readLittleEndian(header.data() + 12, 4) != qwen35TextArchitecture)
-      fail("Unsupported .llmi architecture");
+      return Error("Unsupported .llmi architecture");
     uint64_t manifestSize = readLittleEndian(header.data() + 24, 8);
     if (manifestSize == 0 || manifestSize > maxManifestSize ||
         !contains({0, size}, {headerSize, manifestSize}))
-      fail("Invalid .llmi manifest range");
+      return Error("Invalid .llmi manifest range");
     manifest.resize(manifestSize);
-    file.read({headerSize, manifestSize}, manifest.data());
+    if (auto error = file.read({headerSize, manifestSize}, manifest.data()))
+      return error;
 
     auto schema = getModelSchema(manifest);
-    precision = schema.precision;
-    auto plan = planFile(manifestSize, schema.tensors);
+    if (!schema)
+      return schema.getError();
+    precision = schema->precision;
+    auto plan = planFile(manifestSize, schema->tensors);
+    if (!plan)
+      return plan.getError();
     checksum = readLittleEndian(header.data() + 64, 4);
     // The canonical layout verifies all encoded ranges and rejects overlaps.
-    if (header != encodeHeader(plan, checksum) || size != plan.size())
-      fail("Invalid .llmi sections or file length");
-    uint64_t offset = plan.directory.offset;
-    for (const auto &tensor : plan.tensors) {
+    if (header != encodeHeader(*plan, checksum) || size != plan->size())
+      return Error("Invalid .llmi sections or file length");
+    uint64_t offset = plan->directory.offset;
+    for (const auto &tensor : plan->tensors) {
       Entry entry;
-      file.read({offset, entry.size()}, entry.data());
+      if (auto error = file.read({offset, entry.size()}, entry.data()))
+        return error;
       if (entry != encodeEntry(tensor))
-        fail("Invalid .llmi directory entry for " + tensor.spec.id);
+        return Error("Invalid .llmi directory entry for " + tensor.spec.id);
       offset += entrySize;
     }
-    if (checksum != checksumFile(file, size))
-      fail("Invalid .llmi checksum");
-    tensors = std::move(plan.tensors);
+    auto actualChecksum = checksumFile(file, size);
+    if (!actualChecksum)
+      return actualChecksum.getError();
+    if (checksum != *actualChecksum)
+      return Error("Invalid .llmi checksum");
+    tensors = std::move(plan->tensors);
+    return {};
   }
 
   File file;
@@ -236,8 +275,17 @@ struct ModelFile::Impl {
   std::vector<TensorRecord> tensors;
 };
 
-ModelFile::ModelFile(const std::filesystem::path &path)
-    : impl(std::make_unique<Impl>(path)) {}
+ModelFile::ModelFile(std::unique_ptr<Impl> impl) : impl(std::move(impl)) {}
+
+Result<ModelFile> ModelFile::open(const std::filesystem::path &path) {
+  auto file = File::open(path);
+  if (!file)
+    return file.getError();
+  auto impl = std::make_unique<Impl>(std::move(*file));
+  if (auto error = impl->validate())
+    return error;
+  return ModelFile(std::move(impl));
+}
 
 ModelFile::~ModelFile() = default;
 ModelFile::ModelFile(ModelFile &&) noexcept = default;
@@ -247,7 +295,7 @@ const std::vector<TensorRecord> &ModelFile::getTensors() const {
   return impl->tensors;
 }
 
-const TensorRecord &ModelFile::getTensor(std::string_view id) const {
+const TensorRecord *ModelFile::getTensor(std::string_view id) const {
   if (id == headId)
     id = embeddingId;
   auto it =
@@ -256,8 +304,8 @@ const TensorRecord &ModelFile::getTensor(std::string_view id) const {
                          return tensor.spec.id < id;
                        });
   if (it == impl->tensors.end() || it->spec.id != id)
-    fail("Unknown tensor: " + std::string(id));
-  return *it;
+    return nullptr;
+  return &*it;
 }
 
 Precision ModelFile::getPrecision() const { return impl->precision; }
@@ -265,55 +313,76 @@ const std::string &ModelFile::getManifest() const { return impl->manifest; }
 uint64_t ModelFile::getFileSize() const { return impl->size; }
 uint32_t ModelFile::getChecksum() const { return impl->checksum; }
 
-void ModelFile::read(ByteRange range, void *destination) const {
+Error ModelFile::read(ByteRange range, void *destination) const {
   if (!contains({0, impl->size}, range))
-    fail("Read is outside the model file");
-  impl->file.read(range, destination);
+    return Error("Read is outside the model file");
+  return impl->file.read(range, destination);
 }
 
-void llminfer::writeModelFile(const std::filesystem::path &path,
-                              std::string_view manifest,
-                              const TensorWriter &writeTensor) {
+Error llminfer::writeModelFile(const std::filesystem::path &path,
+                               std::string_view manifest,
+                               const TensorWriter &writeTensor) {
   auto schema = getModelSchema(manifest);
-  auto plan = planFile(manifest.size(), schema.tensors);
-  std::string temporary = path.string() + ".tmp.XXXXXX";
-  int fd = ::mkstemp(temporary.data());
-  if (fd == -1)
-    fail("Creating temporary model: " + std::string(std::strerror(errno)));
-  try {
-    File file(fd);
-    file.resize(plan.size());
-    file.write(plan.manifest, manifest.data());
-    uint64_t offset = plan.directory.offset;
-    for (const auto &tensor : plan.tensors) {
-      Entry entry = encodeEntry(tensor);
-      file.write({offset, entry.size()}, entry.data());
-      offset += entrySize;
-      ByteRange remainingData = tensor.data;
-      ByteRange remainingScales = tensor.scales;
-      writeTensor(tensor, [&](ByteRange chunk, const void *bytes) {
-        ByteRange &remaining =
-            chunk.offset == remainingData.offset && remainingData.size != 0
-                ? remainingData
-                : remainingScales;
-        if (chunk.size == 0 || chunk.offset != remaining.offset ||
-            chunk.size > remaining.size)
-          fail("Unexpected tensor write for " + tensor.spec.id);
-        file.write(chunk, bytes);
-        remaining.offset += chunk.size;
-        remaining.size -= chunk.size;
-      });
-      if (remainingData.size != 0 || remainingScales.size != 0)
-        fail("Incomplete tensor write for " + tensor.spec.id);
-    }
+  if (!schema)
+    return schema.getError();
+  auto plan = planFile(manifest.size(), schema->tensors);
+  if (!plan)
+    return plan.getError();
 
-    Header header = encodeHeader(plan, checksumFile(file, plan.size()));
-    file.write({0, header.size()}, header.data());
-    file.sync();
-    ModelFile validated(temporary);
-    std::filesystem::rename(temporary, path);
-  } catch (...) {
-    std::remove(temporary.c_str());
-    throw;
+  TemporaryPath temporary{path.string() + ".tmp.XXXXXX"};
+  int fd = ::mkstemp(temporary.path.data());
+  if (fd == -1)
+    return fileError("Creating temporary model", errno);
+  temporary.removeOnExit = true;
+  File file(fd);
+
+  if (auto error = file.resize(plan->size()))
+    return error;
+  if (auto error = file.write(plan->manifest, manifest.data()))
+    return error;
+  uint64_t offset = plan->directory.offset;
+  for (const auto &tensor : plan->tensors) {
+    Entry entry = encodeEntry(tensor);
+    if (auto error = file.write({offset, entry.size()}, entry.data()))
+      return error;
+    offset += entrySize;
+    ByteRange remainingData = tensor.data;
+    ByteRange remainingScales = tensor.scales;
+    auto error =
+        writeTensor(tensor, [&](ByteRange chunk, const void *bytes) -> Error {
+          ByteRange &remaining =
+              chunk.offset == remainingData.offset && remainingData.size != 0
+                  ? remainingData
+                  : remainingScales;
+          if (chunk.size == 0 || chunk.offset != remaining.offset ||
+              chunk.size > remaining.size)
+            return Error("Unexpected tensor write for " + tensor.spec.id);
+          if (auto error = file.write(chunk, bytes))
+            return error;
+          remaining.offset += chunk.size;
+          remaining.size -= chunk.size;
+          return {};
+        });
+    if (error)
+      return error;
+    if (remainingData.size != 0 || remainingScales.size != 0)
+      return Error("Incomplete tensor write for " + tensor.spec.id);
   }
+
+  auto checksum = checksumFile(file, plan->size());
+  if (!checksum)
+    return checksum.getError();
+  Header header = encodeHeader(*plan, *checksum);
+  if (auto error = file.write({0, header.size()}, header.data()))
+    return error;
+  if (auto error = file.sync())
+    return error;
+  auto validated = ModelFile::open(temporary.path);
+  if (!validated)
+    return validated.getError();
+
+  if (::rename(temporary.path.c_str(), path.c_str()) == -1)
+    return fileError("Publishing model", errno);
+  temporary.removeOnExit = false;
+  return {};
 }

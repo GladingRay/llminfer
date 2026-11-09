@@ -30,3 +30,4 @@ The sole commit is `Initial commit`. Use short, imperative subjects for new comm
 6. 不同的模块要放在不同的文件中，不同的大组件要放到不同的目录中。
 7. qwen3.5 4B 的路径在 `/Users/guorui/Work/models/qwen3.5-4b` 。
 8. python环境：`/Users/guorui/Work/models/venv314`。
+9. C++ 代码使用返回值传递错误，禁用异常。

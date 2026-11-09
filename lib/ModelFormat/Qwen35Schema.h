@@ -16,8 +16,10 @@ struct ModelSchema {
   std::vector<TensorSpec> tensors;
 };
 
-nlohmann::json parseJson(std::string_view text);
-ModelSchema getModelSchema(std::string_view manifest);
+const nlohmann::json &getField(const nlohmann::json &object,
+                               std::string_view key);
+Result<nlohmann::json> parseJson(std::string_view text);
+Result<ModelSchema> getModelSchema(std::string_view manifest);
 std::string makeManifest(const nlohmann::json &sourceConfig,
                          Precision precision,
                          const std::vector<std::string> &skippedTensors);

@@ -26,8 +26,8 @@ float decodeFloat(const uint8_t *data, SourceType type) {
   return value;
 }
 
-void convertDense(const SourceTensor &source, const TensorRecord &target,
-                  const PayloadSink &sink) {
+Error convertDense(const SourceTensor &source, const TensorRecord &target,
+                   const PayloadSink &sink) {
   unsigned srcSize = getSourceTypeSize(source.type);
   unsigned dstSize = target.spec.dtype == DType::F16 ? 2 : 4;
   uint64_t elements = source.data.size / srcSize;
@@ -36,33 +36,37 @@ void convertDense(const SourceTensor &source, const TensorRecord &target,
   std::vector<uint8_t> output(step * dstSize);
   for (uint64_t i = 0; i < elements;) {
     uint64_t count = std::min(step, elements - i);
-    source.file->read({source.data.offset + i * srcSize, count * srcSize},
-                      input.data());
+    if (auto error = source.file->read(
+            {source.data.offset + i * srcSize, count * srcSize}, input.data()))
+      return error;
     for (uint64_t j = 0; j < count; ++j) {
       float value = decodeFloat(input.data() + j * srcSize, source.type);
       if (!std::isfinite(value))
-        fail("Non-finite weight");
+        return Error("Non-finite weight");
       uint32_t bits;
       if (dstSize == 2) {
         bits = floatToHalf(value);
         if ((bits & 0x7c00) == 0x7c00)
-          fail("Weight exceeds FP16 range");
+          return Error("Weight exceeds FP16 range");
       } else {
         std::memcpy(&bits, &value, sizeof(bits));
       }
       writeLittleEndian(output.data() + j * dstSize, bits, dstSize);
     }
-    sink({target.data.offset + i * dstSize, count * dstSize}, output.data());
+    if (auto error = sink({target.data.offset + i * dstSize, count * dstSize},
+                          output.data()))
+      return error;
     i += count;
   }
+  return {};
 }
 
-void convertQuantized(const SourceTensor &source, const TensorRecord &target,
-                      const PayloadSink &sink) {
+Error convertQuantized(const SourceTensor &source, const TensorRecord &target,
+                       const PayloadSink &sink) {
   uint64_t rows = source.shape[0];
   uint64_t columns = source.shape[1];
   unsigned elementSize = getSourceTypeSize(source.type);
-  uint64_t inputStride = checkedMul(columns, elementSize);
+  uint64_t inputStride = source.data.size / rows;
   uint64_t outputStride = target.storageShape[1];
   uint64_t groups = outputStride / weightGroupSize;
   uint64_t scaleStride = 2 * groups;
@@ -75,9 +79,10 @@ void convertQuantized(const SourceTensor &source, const TensorRecord &target,
 
   for (uint64_t row = 0; row < rows;) {
     uint64_t count = std::min(rowsPerChunk, rows - row);
-    source.file->read(
-        {source.data.offset + row * inputStride, count * inputStride},
-        input.data());
+    if (auto error = source.file->read(
+            {source.data.offset + row * inputStride, count * inputStride},
+            input.data()))
+      return error;
     for (uint64_t r = 0; r < count; ++r) {
       for (uint64_t group = 0; group < groups; ++group) {
         uint64_t column = group * weightGroupSize;
@@ -86,38 +91,54 @@ void convertQuantized(const SourceTensor &source, const TensorRecord &target,
             input.data() + r * inputStride + column * elementSize;
         for (unsigned i = 0; i < valid; ++i)
           values[i] = decodeFloat(groupInput + i * elementSize, source.type);
-        uint16_t scale = quantizeWeightGroup(
+        auto scale = quantizeWeightGroup(
             values.data(), valid, output.data() + r * outputStride + column);
-        writeLittleEndian(scales.data() + r * scaleStride + 2 * group, scale,
+        if (!scale)
+          return scale.getError();
+        writeLittleEndian(scales.data() + r * scaleStride + 2 * group, *scale,
                           2);
       }
     }
-    sink({target.data.offset + row * outputStride, count * outputStride},
-         output.data());
-    sink({target.scales.offset + row * scaleStride, count * scaleStride},
-         scales.data());
+    if (auto error = sink(
+            {target.data.offset + row * outputStride, count * outputStride},
+            output.data()))
+      return error;
+    if (auto error = sink(
+            {target.scales.offset + row * scaleStride, count * scaleStride},
+            scales.data()))
+      return error;
     row += count;
   }
+  return {};
 }
 } // namespace
 
-void llminfer::convertModel(const std::filesystem::path &sourceDirectory,
-                            const std::filesystem::path &outputPath,
-                            Precision precision) {
+Error llminfer::convertModel(const std::filesystem::path &sourceDirectory,
+                             const std::filesystem::path &outputPath,
+                             Precision precision) {
   if (outputPath.extension() != ".llmi")
-    fail("Output path must end in .llmi");
-  auto sourceConfig =
-      parseJson(readTextFile(sourceDirectory / "config.json", maxManifestSize));
-  auto schema = getModelSchema(makeManifest(sourceConfig, precision, {}));
-  Safetensors shards(sourceDirectory);
-  const auto &tensors = shards.getTensors();
+    return Error("Output path must end in .llmi");
+  auto configText =
+      readTextFile(sourceDirectory / "config.json", maxManifestSize);
+  if (!configText)
+    return configText.getError();
+  auto sourceConfig = parseJson(*configText);
+  if (!sourceConfig)
+    return Error("config.json: " + sourceConfig.getError().getMessage());
+  auto schema = getModelSchema(makeManifest(*sourceConfig, precision, {}));
+  if (!schema)
+    return schema.getError();
+  auto shards = Safetensors::open(sourceDirectory);
+  if (!shards)
+    return shards.getError();
+  const auto &tensors = shards->getTensors();
   std::map<std::string, const SourceTensor *> sourceById;
-  for (const auto &expected : schema.tensors) {
+  for (const auto &expected : schema->tensors) {
     auto source = tensors.find(std::string(hfTextPrefix) + expected.id);
     if (source == tensors.end())
-      fail("Missing tensor: " + expected.id);
+      return Error("Missing tensor: " + expected.id);
     if (source->second.shape != expected.shape)
-      fail("Unexpected shape for tensor: " + expected.id);
+      return Error("Unexpected shape for tensor: " + expected.id);
     sourceById.emplace(expected.id, &source->second);
   }
   std::vector<std::string> skippedTensors;
@@ -125,26 +146,28 @@ void llminfer::convertModel(const std::filesystem::path &sourceDirectory,
     std::string_view name = entry.first;
     if (name.substr(0, hfTextPrefix.size()) == hfTextPrefix) {
       if (sourceById.count(std::string(name.substr(hfTextPrefix.size()))) == 0)
-        fail("Unexpected text tensor: " + entry.first);
+        return Error("Unexpected text tensor: " + entry.first);
     } else if (name.substr(0, 13) == "model.visual." ||
                name.substr(0, 4) == "mtp.") {
       skippedTensors.push_back(entry.first);
     } else {
-      fail("Unexpected checkpoint tensor: " + entry.first);
+      return Error("Unexpected checkpoint tensor: " + entry.first);
     }
   }
 
-  auto manifest = makeManifest(sourceConfig, precision, skippedTensors);
-  writeModelFile(outputPath, manifest,
-                 [&](const TensorRecord &target, const PayloadSink &sink) {
-                   const auto &source = *sourceById.at(target.spec.id);
-                   try {
-                     if (target.layout == Layout::RowMajorI8Group32)
-                       convertQuantized(source, target, sink);
-                     else
-                       convertDense(source, target, sink);
-                   } catch (const std::exception &error) {
-                     fail(target.spec.id + ": " + error.what());
-                   }
-                 });
+  auto manifest = makeManifest(*sourceConfig, precision, skippedTensors);
+  return writeModelFile(
+      outputPath, manifest,
+      [&](const TensorRecord &target, const PayloadSink &sink) {
+        auto it = sourceById.find(target.spec.id);
+        if (it == sourceById.end())
+          return Error("Missing tensor: " + target.spec.id);
+        const auto &source = *it->second;
+        auto error = target.layout == Layout::RowMajorI8Group32
+                         ? convertQuantized(source, target, sink)
+                         : convertDense(source, target, sink);
+        if (error)
+          return Error(target.spec.id + ": " + error.getMessage());
+        return Error();
+      });
 }

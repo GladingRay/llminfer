@@ -9,74 +9,93 @@ using namespace llminfer;
 using nlohmann::json;
 
 namespace {
-uint64_t dimension(const json &object, const char *key) {
-  const auto &value = object.at(key);
-  if (!value.is_number_unsigned() || value == 0)
-    fail(std::string("Invalid model dimension: ") + key);
-  return value.get<uint64_t>();
+Error require(const json &object, const char *key, const json &expected) {
+  if (getField(object, key) != expected)
+    return Error(std::string("Unsupported model configuration: ") + key);
+  return {};
 }
 
-void require(const json &object, const char *key, const json &expected) {
-  if (object.at(key) != expected)
-    fail(std::string("Unsupported model configuration: ") + key);
+double number(const json &value) {
+  return value.is_number() ? value.get<double>() : 0.0;
 }
 
-std::vector<TensorSpec> getTextTensors(const json &config,
-                                       Precision precision) {
-  require(config, "model_type", "qwen3_5");
-  require(config, "tie_word_embeddings", true);
-  const auto &text = config.at("text_config");
-  require(text, "model_type", "qwen3_5_text");
-  require(text, "tie_word_embeddings", true);
-  require(text, "attention_bias", false);
-  require(text, "attn_output_gate", true);
-  require(text, "hidden_act", "silu");
-  require(text, "mlp_only_layers", json::array());
+Result<std::vector<TensorSpec>> getTextTensors(const json &config,
+                                               Precision precision) {
+  if (auto error = require(config, "model_type", "qwen3_5"))
+    return error;
+  if (auto error = require(config, "tie_word_embeddings", true))
+    return error;
 
-  uint64_t hidden = dimension(text, "hidden_size");
-  uint64_t intermediate = dimension(text, "intermediate_size");
-  uint64_t vocabulary = dimension(text, "vocab_size");
-  uint64_t layerCount = dimension(text, "num_hidden_layers");
-  uint64_t headDim = dimension(text, "head_dim");
-  uint64_t qHeads = dimension(text, "num_attention_heads");
-  uint64_t kvHeads = dimension(text, "num_key_value_heads");
-  uint64_t keyHeads = dimension(text, "linear_num_key_heads");
-  uint64_t valueHeads = dimension(text, "linear_num_value_heads");
-  uint64_t linearKey =
-      checkedMul(keyHeads, dimension(text, "linear_key_head_dim"));
-  uint64_t linearValueDim = dimension(text, "linear_value_head_dim");
-  uint64_t linearValue = checkedMul(valueHeads, linearValueDim);
-  uint64_t linearQkv = checkedAdd(checkedMul(2, linearKey), linearValue);
-  uint64_t convKernel = dimension(text, "linear_conv_kernel_dim");
-  uint64_t query = checkedMul(qHeads, headDim);
-  uint64_t keyValue = checkedMul(kvHeads, headDim);
-  dimension(text, "max_position_embeddings");
+  const auto &text = getField(config, "text_config");
+  const std::pair<const char *, json> options[] = {
+      {"model_type", "qwen3_5_text"}, {"tie_word_embeddings", true},
+      {"attention_bias", false},      {"attn_output_gate", true},
+      {"hidden_act", "silu"},         {"mlp_only_layers", json::array()}};
+  for (const auto &option : options)
+    if (auto error = require(text, option.first, option.second))
+      return error;
+
+  uint64_t hidden, intermediate, vocabulary, layerCount, headDim, qHeads,
+      kvHeads, keyHeads, valueHeads, linearKeyDim, linearValueDim, convKernel,
+      maxPositions;
+  const std::pair<const char *, uint64_t &> dimensions[] = {
+      {"hidden_size", hidden},
+      {"intermediate_size", intermediate},
+      {"vocab_size", vocabulary},
+      {"num_hidden_layers", layerCount},
+      {"head_dim", headDim},
+      {"num_attention_heads", qHeads},
+      {"num_key_value_heads", kvHeads},
+      {"linear_num_key_heads", keyHeads},
+      {"linear_num_value_heads", valueHeads},
+      {"linear_key_head_dim", linearKeyDim},
+      {"linear_value_head_dim", linearValueDim},
+      {"linear_conv_kernel_dim", convKernel},
+      {"max_position_embeddings", maxPositions}};
+  for (const auto &dimension : dimensions) {
+    const auto &value = getField(text, dimension.first);
+    if (!value.is_number_unsigned() || value == 0)
+      return Error(std::string("Invalid model dimension: ") + dimension.first);
+    dimension.second = value.get<uint64_t>();
+  }
+
+  uint64_t linearKey, linearValue, linearQkv, query, gatedQuery, keyValue;
+  if (!checkedMul(keyHeads, linearKeyDim, linearKey) ||
+      !checkedMul(valueHeads, linearValueDim, linearValue) ||
+      !checkedMul(2, linearKey, linearQkv) ||
+      !checkedAdd(linearQkv, linearValue, linearQkv) ||
+      !checkedMul(qHeads, headDim, query) ||
+      !checkedMul(2, query, gatedQuery) ||
+      !checkedMul(kvHeads, headDim, keyValue))
+    return Error("Attention dimension overflow");
   if (qHeads % kvHeads || valueHeads % keyHeads)
-    fail("Incompatible attention head counts");
+    return Error("Incompatible attention head counts");
 
-  const auto &rope = text.at("rope_parameters");
-  require(rope, "rope_type", "default");
-  require(rope, "mrope_interleaved", true);
-  double rotaryFactor = rope.at("partial_rotary_factor").get<double>();
+  const auto &rope = getField(text, "rope_parameters");
+  if (auto error = require(rope, "rope_type", "default"))
+    return error;
+  if (auto error = require(rope, "mrope_interleaved", true))
+    return error;
+  double rotaryFactor = number(getField(rope, "partial_rotary_factor"));
   double rotaryWidth = headDim * rotaryFactor;
-  const auto &sections = rope.at("mrope_section");
+  const auto &sections = getField(rope, "mrope_section");
   if (!(rotaryFactor > 0 && rotaryFactor <= 1) || rotaryWidth < 2 ||
       std::fmod(rotaryWidth, 2) != 0 || !sections.is_array() ||
-      sections.size() != 3 || !(rope.at("rope_theta").get<double>() > 0) ||
-      !(text.at("rms_norm_eps").get<double>() > 0))
-    fail("Invalid RoPE or normalization configuration");
+      sections.size() != 3 || !(number(getField(rope, "rope_theta")) > 0) ||
+      !(number(getField(text, "rms_norm_eps")) > 0))
+    return Error("Invalid RoPE or normalization configuration");
   uint64_t sectionSum = 0;
   for (const auto &section : sections) {
-    if (!section.is_number_unsigned())
-      fail("Invalid RoPE section");
-    sectionSum = checkedAdd(sectionSum, section.get<uint64_t>());
+    if (!section.is_number_unsigned() ||
+        !checkedAdd(sectionSum, section.get<uint64_t>(), sectionSum))
+      return Error("Invalid RoPE section");
   }
   if (static_cast<double>(sectionSum) != rotaryWidth / 2)
-    fail("RoPE section sizes disagree with rotary width");
+    return Error("RoPE section sizes disagree with rotary width");
 
-  const auto &layers = text.at("layer_types");
+  const auto &layers = getField(text, "layer_types");
   if (!layers.is_array() || layers.size() != layerCount || layerCount > 1024)
-    fail("Invalid layer_types array");
+    return Error("Invalid layer_types array");
 
   DType matrix = precision == Precision::W8A8 ? DType::I8 : DType::F16;
   std::vector<TensorSpec> tensors;
@@ -106,14 +125,14 @@ std::vector<TensorSpec> getTextTensors(const json &config,
       add("linear_attn.A_log", {valueHeads}, DType::F32);
       add("linear_attn.dt_bias", {valueHeads}, DType::F32);
     } else if (layers[i] == "full_attention") {
-      add("self_attn.q_proj.weight", {checkedMul(query, 2), hidden}, matrix);
+      add("self_attn.q_proj.weight", {gatedQuery, hidden}, matrix);
       add("self_attn.k_proj.weight", {keyValue, hidden}, matrix);
       add("self_attn.v_proj.weight", {keyValue, hidden}, matrix);
       add("self_attn.o_proj.weight", {hidden, query}, matrix);
       add("self_attn.q_norm.weight", {headDim}, DType::F32);
       add("self_attn.k_norm.weight", {headDim}, DType::F32);
     } else {
-      fail("Unsupported layer type at layer " + std::to_string(i));
+      return Error("Unsupported layer type at layer " + std::to_string(i));
     }
   }
 
@@ -125,15 +144,41 @@ std::vector<TensorSpec> getTextTensors(const json &config,
 }
 } // namespace
 
-json llminfer::parseJson(std::string_view text) {
+const json &llminfer::getField(const json &object, std::string_view key) {
+  static const json missing;
+  auto it = object.find(key);
+  return it == object.end() ? missing : *it;
+}
+
+Result<json> llminfer::parseJson(std::string_view text) {
   if (text.find('\0') != std::string_view::npos)
-    fail("Unexpected NUL in JSON metadata");
+    return Error("Unexpected NUL in JSON metadata");
+
+  // Bound nesting before parsing. A parser callback can discard a value, but
+  // it cannot stop the parser from descending into that value.
+  unsigned depth = 0;
+  bool quoted = false;
+  bool escaped = false;
+  for (char ch : text) {
+    if (quoted) {
+      if (!escaped && ch == '"')
+        quoted = false;
+      escaped = !escaped && ch == '\\';
+    } else if (ch == '"') {
+      quoted = true;
+    } else if (ch == '[' || ch == '{') {
+      if (++depth > 64)
+        return Error("JSON nesting exceeds limit");
+    } else if ((ch == ']' || ch == '}') && depth != 0) {
+      --depth;
+    }
+  }
+
   std::vector<std::unordered_set<std::string>> keys;
-  return json::parse(
+  std::string duplicate;
+  auto parsed = json::parse(
       text.begin(), text.end(),
-      [&](int depth, json::parse_event_t event, json &value) {
-        if (depth > 64)
-          fail("JSON nesting exceeds limit");
+      [&](int, json::parse_event_t event, json &value) {
         switch (event) {
         case json::parse_event_t::object_start:
           keys.emplace_back();
@@ -141,41 +186,61 @@ json llminfer::parseJson(std::string_view text) {
         case json::parse_event_t::object_end:
           keys.pop_back();
           break;
-        case json::parse_event_t::key:
-          if (!keys.back().insert(value.get<std::string>()).second)
-            fail("Duplicate JSON key: " + value.get<std::string>());
+        case json::parse_event_t::key: {
+          const auto &key = value.get_ref<const std::string &>();
+          if (!keys.back().insert(key).second && duplicate.empty())
+            duplicate = "Duplicate JSON key: " + key;
           break;
+        }
         default:
           break;
         }
         return true;
-      });
+      },
+      /*allow_exceptions=*/false);
+  if (parsed.is_discarded())
+    return Error("Invalid JSON metadata");
+  if (!duplicate.empty())
+    return Error(std::move(duplicate));
+  return parsed;
 }
 
 std::string_view llminfer::getPrecisionName(Precision precision) {
   return precision == Precision::W8A8 ? "w8a8" : "f16";
 }
 
-ModelSchema llminfer::getModelSchema(std::string_view manifest) {
-  const auto root = parseJson(manifest);
-  require(root, "quantization_version", 1);
+Result<ModelSchema> llminfer::getModelSchema(std::string_view manifest) {
+  auto root = parseJson(manifest);
+  if (!root)
+    return root.getError();
+  if (auto error = require(*root, "quantization_version", 1))
+    return error;
+
   Precision precision;
-  if (root.at("precision") == "w8a8") {
-    require(root, "weight_group_size", weightGroupSize);
+  if (getField(*root, "precision") == "w8a8") {
+    if (auto error = require(*root, "weight_group_size", weightGroupSize))
+      return error;
     precision = Precision::W8A8;
-  } else if (root.at("precision") == "f16") {
-    require(root, "weight_group_size", 0);
+  } else if (getField(*root, "precision") == "f16") {
+    if (auto error = require(*root, "weight_group_size", 0))
+      return error;
     precision = Precision::F16;
   } else {
-    fail("Unsupported model precision");
+    return Error("Unsupported model precision");
   }
-  require(root.at("aliases"), "lm_head.weight", embeddingId);
-  const auto &skipped = root.at("skipped_tensors");
+  if (auto error =
+          require(getField(*root, "aliases"), "lm_head.weight", embeddingId))
+    return error;
+  const auto &skipped = getField(*root, "skipped_tensors");
   if (!skipped.is_array() ||
       !std::all_of(skipped.begin(), skipped.end(),
                    [](const json &name) { return name.is_string(); }))
-    fail("Invalid skipped_tensors array");
-  return {precision, getTextTensors(root.at("source_config"), precision)};
+    return Error("Invalid skipped_tensors array");
+
+  auto tensors = getTextTensors(getField(*root, "source_config"), precision);
+  if (!tensors)
+    return tensors.getError();
+  return ModelSchema{precision, std::move(*tensors)};
 }
 
 std::string

@@ -4,6 +4,7 @@ project(llminfer LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+add_compile_options("$<$<COMPILE_LANG_AND_ID:CXX,AppleClang,Clang,GNU>:-fno-exceptions>")
 
 find_package(ZLIB REQUIRED)
 find_package(nlohmann_json 3.12.0 QUIET)

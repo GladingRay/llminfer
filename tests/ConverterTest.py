@@ -18,7 +18,7 @@ def run(*args, error=None):
     if error is None:
         assert result.returncode == 0, result.stderr
     else:
-        assert result.returncode != 0 and error in result.stderr, result
+        assert result.returncode == 1 and error in result.stderr, result
     return result.stdout
 
 
@@ -162,6 +162,8 @@ def test_conversion(directory):
     scale = struct.unpack_from("<10e", data, tensor["scales"]["offset"])
     assert scale[0] == 1 and scale[1] == struct.unpack("<e", struct.pack("<e", 1 / 127))[0]
     assert scale[2:8] == (1,) * 6 and scale[-1] == 1
+    run("inspect", first, "--tensor", "missing", error="Unknown tensor")
+    run("inspect", directory / "missing.llmi", error="Opening")
 
     norm = inspect_tensor(first, "layers.0.linear_attn.A_log")["tensor"]
     assert norm["dtype"] == "F32"
@@ -193,6 +195,30 @@ def test_conversion(directory):
     changed[offset] ^= 1
     bad.write_bytes(changed)
     run("inspect", bad, error="checksum")
+    manifest_offset = struct.unpack_from("<Q", data, 16)[0]
+    changed = bytearray(data)
+    changed[manifest_offset] = ord("!")
+    bad.write_bytes(changed)
+    run("inspect", bad, error="Invalid JSON metadata")
+
+    config_path = directory / "config.json"
+    valid_config = config_path.read_text()
+    config = json.loads(valid_config)
+    config["text_config"]["hidden_size"] = "33"
+    config_path.write_text(json.dumps(config))
+    run("convert", directory, first, error="Invalid model dimension: hidden_size")
+    config_path.write_text('{"model_type":"qwen3_5",' + valid_config[1:])
+    run("convert", directory, first, error="Duplicate JSON key: model_type")
+    config_path.write_text("[" * 65 + "]" * 65)
+    run("convert", directory, first, error="JSON nesting exceeds limit")
+    assert first.read_bytes() == data
+    config_path.write_text(valid_config)
+
+    target_directory = directory / "output.llmi"
+    target_directory.mkdir()
+    run("convert", directory, target_directory, error="Publishing model")
+    assert target_directory.is_dir()
+    assert not list(directory.glob("*.tmp.*"))
 
     write_checkpoint(directory, invalid_weight=True)
     run("convert", directory, first, error="Non-finite weight")

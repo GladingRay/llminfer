@@ -19,13 +19,14 @@ struct SourceTensor {
 /// Owns all shard descriptors for the lifetime of the tensor views.
 class Safetensors {
 public:
-  explicit Safetensors(const std::filesystem::path &directory);
+  static Result<Safetensors> open(const std::filesystem::path &directory);
 
   const std::map<std::string, SourceTensor> &getTensors() const {
     return tensors;
   }
 
 private:
+  Safetensors() = default;
   std::vector<std::unique_ptr<File>> shards;
   std::map<std::string, SourceTensor> tensors;
 };

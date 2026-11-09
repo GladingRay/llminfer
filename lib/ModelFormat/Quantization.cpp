@@ -1,5 +1,4 @@
 #include "llminfer/ModelFormat/Quantization.h"
-#include "File.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -55,14 +54,15 @@ float llminfer::halfToFloat(uint16_t bits) {
   return value;
 }
 
-uint16_t llminfer::quantizeWeightGroup(const float *values, unsigned count,
-                                       int8_t *quantized) {
+Result<uint16_t> llminfer::quantizeWeightGroup(const float *values,
+                                               unsigned count,
+                                               int8_t *quantized) {
   if (count == 0 || count > weightGroupSize)
-    fail("Invalid quantization group length");
+    return Error("Invalid quantization group length");
   float maxAbs = 0.0f;
   for (unsigned i = 0; i < count; ++i) {
     if (!std::isfinite(values[i]))
-      fail("Non-finite weight");
+      return Error("Non-finite weight");
     maxAbs = std::max(maxAbs, std::abs(values[i]));
   }
 
@@ -75,7 +75,7 @@ uint16_t llminfer::quantizeWeightGroup(const float *values, unsigned count,
   uint16_t storedScale = floatToHalf(std::max(maxAbs / 127.0f, 0x1p-14f));
   float scale = halfToFloat(storedScale);
   if (!std::isfinite(scale))
-    fail("Weight scale exceeds FP16 range");
+    return Error("Weight scale exceeds FP16 range");
   for (unsigned i = 0; i < count; ++i)
     quantized[i] = roundEven(std::clamp(values[i] / scale, -127.0f, 127.0f));
   return storedScale;

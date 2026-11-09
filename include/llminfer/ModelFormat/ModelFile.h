@@ -1,6 +1,7 @@
 #ifndef LLMINFER_MODELFORMAT_MODELFILE_H
 #define LLMINFER_MODELFORMAT_MODELFILE_H
 
+#include "llminfer/Support/Result.h"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -46,41 +47,43 @@ std::string_view getDTypeName(DType dtype);
 std::string_view getLayoutName(Layout layout);
 
 /// Splits a rank-two tensor into row ranges whose buffers fit independently.
-std::vector<RowSlice> splitRows(const TensorRecord &tensor,
-                                uint64_t maxBufferLength);
+Result<std::vector<RowSlice>> splitRows(const TensorRecord &tensor,
+                                        uint64_t maxBufferLength);
 
 class ModelFile {
 public:
   /// Validates metadata, tensor layout and the checksum before returning.
-  explicit ModelFile(const std::filesystem::path &path);
+  static Result<ModelFile> open(const std::filesystem::path &path);
   ~ModelFile();
   ModelFile(ModelFile &&) noexcept;
   ModelFile &operator=(ModelFile &&) noexcept;
 
   const std::vector<TensorRecord> &getTensors() const;
-  const TensorRecord &getTensor(std::string_view id) const;
+  const TensorRecord *getTensor(std::string_view id) const;
   Precision getPrecision() const;
   const std::string &getManifest() const;
   uint64_t getFileSize() const;
   uint32_t getChecksum() const;
 
   /// Reads a validated file range into caller-owned storage.
-  void read(ByteRange range, void *destination) const;
+  Error read(ByteRange range, void *destination) const;
 
 private:
   struct Impl;
+  explicit ModelFile(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl;
 };
 
 /// The callback writes each data and scale range in order, in one or more
 /// chunks.
-using PayloadSink = std::function<void(ByteRange, const void *)>;
+using PayloadSink = std::function<Error(ByteRange, const void *)>;
 using TensorWriter =
-    std::function<void(const TensorRecord &, const PayloadSink &)>;
+    std::function<Error(const TensorRecord &, const PayloadSink &)>;
 
 /// Writes and validates a temporary model before publishing it atomically.
-void writeModelFile(const std::filesystem::path &path,
-                    std::string_view manifest, const TensorWriter &writeTensor);
+Error writeModelFile(const std::filesystem::path &path,
+                     std::string_view manifest,
+                     const TensorWriter &writeTensor);
 
 } // namespace llminfer
 
