@@ -102,6 +102,12 @@ y     = qᵀ S1
 
 卷积只需保存最近 3 个**卷积前**的 QKV 向量。首版 prefill 采用分块投影和逐 token 递归，可用单个 dispatch 按 head 和 V 维分 tile，并在 tile 内保持时间顺序。decode 复用单步递归。GQA prefill 和 decode 可先共享在线 softmax 实现，按 query/head 扫描有效的 K/V，避免分配 `T×T` 中间结果。优化阶段再引入 tiled prefill、长上下文分段归约和 chunked DeltaNet。
 
+### FP16 参考图
+
+`MetalReferenceGraph` 执行 embedding、首个 DeltaNet block、首个 GQA block、最终 RMSNorm 和共享输出头。本地 4B 检查点对应第 0 层和第 3 层，直接串接用于验证算子。参考版使用带边界检查的 FP16 分块线性投影和 FP32 累加，GQA 暂存每个 query/head 的可见分数，以便对齐 Transformers eager 路径的 FP16 舍入。每个 chunk 保留 FP16 卷积历史、FP32 递归状态和 FP16 KV cache。
+
+`llmi-reference` 输出 FP32 表示的对拍数据。激活按 token 顺序展开，卷积历史按 `[channel, kernel-1]`，递归状态按 `[valueHead, keyDim, valueDim]`，旋转后的 K 按 `[past+T, kvHead, headDim]` 展开。对拍使用固定版本的 Transformers 从源权重独立执行相同的两层，并验证不同 chunk 划分下的结果一致性。
+
 ## 5. GraphIR、执行计划与会话状态
 
 **GraphIR** 是有序 SSA 数据流。`ValueDesc` 包含 dtype、逻辑形状和布局约束，`Op` 包含类型、输入输出、强类型属性和 layer ID。权重使用 `TensorId`，运行时维度只包含输入 token 数 `T` 和已有前缀 `P`。对 `KvAppend`、`CausalConv1d` 和 `DeltaUpdate` 显式记录状态 slot 及读写范围或状态版本。图验证器检查 dtype、shape、use-def、别名和状态顺序。`Qwen35GraphBuilder` 负责将模型算子编码进 GraphIR。

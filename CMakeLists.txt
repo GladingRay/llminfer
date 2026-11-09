@@ -34,6 +34,39 @@ add_executable(llmi
 target_include_directories(llmi PRIVATE lib/ModelFormat)
 target_link_libraries(llmi PRIVATE llminfer_model_format nlohmann_json::nlohmann_json)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  enable_language(OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 17)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+  set(CMAKE_OBJCXX_EXTENSIONS OFF)
+
+  set(METAL_REFERENCE_KERNELS "${CMAKE_CURRENT_SOURCE_DIR}/lib/Backend/Metal/Kernels")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${METAL_REFERENCE_KERNELS}/ReferenceParams.h"
+    "${METAL_REFERENCE_KERNELS}/Reference.metal")
+  file(READ "${METAL_REFERENCE_KERNELS}/ReferenceParams.h" REFERENCE_PARAMS)
+  file(READ "${METAL_REFERENCE_KERNELS}/Reference.metal" REFERENCE_MSL)
+  configure_file("${METAL_REFERENCE_KERNELS}/ReferenceSource.h.in"
+                 "generated/ReferenceSource.h" @ONLY)
+
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  add_library(llminfer_metal_reference
+    lib/Backend/Metal/MetalContext.mm
+    lib/Models/Qwen35/MetalReferenceGraph.mm)
+  target_compile_options(llminfer_metal_reference PRIVATE
+    -fobjc-arc -fno-exceptions -fno-objc-exceptions)
+  target_include_directories(llminfer_metal_reference PUBLIC include PRIVATE
+    lib/Backend/Metal lib/ModelFormat "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  target_link_libraries(llminfer_metal_reference PRIVATE
+    llminfer_model_format nlohmann_json::nlohmann_json
+    "${METAL_FRAMEWORK}" "${FOUNDATION_FRAMEWORK}")
+
+  add_executable(llmi-reference tools/reference/Main.cpp)
+  target_link_libraries(llmi-reference PRIVATE
+    llminfer_metal_reference nlohmann_json::nlohmann_json)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
   add_executable(model_format_test tests/ModelFormatTest.cpp)
@@ -43,4 +76,10 @@ if(BUILD_TESTING)
   add_test(NAME converter
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ConverterTest.py"
             "$<TARGET_FILE:llmi>")
+  if(TARGET llmi-reference)
+    add_test(NAME metal_reference
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/MetalReferenceTest.py"
+              "$<TARGET_FILE:llmi>" "$<TARGET_FILE:llmi-reference>" --allow-skip)
+    set_tests_properties(metal_reference PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 endif()
