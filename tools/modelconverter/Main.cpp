@@ -1,9 +1,6 @@
 #include "Converter.h"
 #include "GraphCommand.h"
 #include "Qwen35Schema.h"
-#ifdef LLMINFER_HAS_METAL
-#include "RunCommand.h"
-#endif
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -19,10 +16,6 @@ void printUsage(std::ostream &out) {
       << "  llmi inspect <model.llmi> [--tensor <id>] [--json]\n"
       << "  llmi graph <model.llmi> [--tokens T] [--past P] [--capacity N] "
          "[--logits none|last|all] [--json]\n";
-#ifdef LLMINFER_HAS_METAL
-  out << "  llmi run <model.llmi> <token[,token...]>... [--capacity N] "
-         "[--logits none|last|all] [--plan]\n";
-#endif
 }
 
 json describeTensor(const TensorRecord &tensor) {
@@ -139,11 +132,6 @@ int run(int argc, char **argv) {
 
   if (argc >= 3 && std::string_view(argv[1]) == "graph")
     return report(describeGraph(argc, argv));
-
-#ifdef LLMINFER_HAS_METAL
-  if (argc >= 3 && std::string_view(argv[1]) == "run")
-    return report(runMetal(argc, argv));
-#endif
 
   printUsage(std::cerr);
   return EXIT_FAILURE;

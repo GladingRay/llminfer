@@ -45,7 +45,8 @@ add_executable(llmi
   tools/modelconverter/Safetensors.cpp
 )
 target_include_directories(llmi PRIVATE lib/ModelFormat)
-target_link_libraries(llmi PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(llmi PRIVATE
+  llminfer_qwen35_builder nlohmann_json::nlohmann_json)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   enable_language(OBJCXX)
@@ -93,15 +94,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   target_link_libraries(llminfer_metal
     PUBLIC llminfer_qwen35_builder
     PRIVATE llminfer_metal_context)
-  target_sources(llmi PRIVATE tools/modelconverter/RunCommand.cpp)
-  target_compile_definitions(llmi PRIVATE LLMINFER_HAS_METAL)
-  target_link_libraries(llmi PRIVATE llminfer_metal)
+  add_executable(llmi-run tools/run/Main.cpp)
+  target_link_libraries(llmi-run PRIVATE llminfer_metal nlohmann_json::nlohmann_json)
 
   add_executable(llmi-reference tools/reference/Main.cpp)
   target_link_libraries(llmi-reference PRIVATE
     llminfer_metal_reference nlohmann_json::nlohmann_json)
-else()
-  target_link_libraries(llmi PRIVATE llminfer_qwen35_builder)
 endif()
 
 include(CTest)
@@ -122,7 +120,8 @@ if(BUILD_TESTING)
   if(TARGET llmi-reference)
     add_test(NAME metal_reference
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/MetalReferenceTest.py"
-              "$<TARGET_FILE:llmi>" "$<TARGET_FILE:llmi-reference>" --allow-skip)
+              "$<TARGET_FILE:llmi>" "$<TARGET_FILE:llmi-reference>"
+              --run-cli "$<TARGET_FILE:llmi-run>" --allow-skip)
     set_tests_properties(metal_reference PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()

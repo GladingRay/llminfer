@@ -1,19 +1,25 @@
-#include "RunCommand.h"
 #include "../TokenChunk.h"
 #include "llminfer/Backend/Metal/MetalSession.h"
 #include "llminfer/Support/CheckedArithmetic.h"
+#include <cstdlib>
 #include <iostream>
 #include <nlohmann/json.hpp>
 
 using namespace llminfer;
 using nlohmann::json;
 
-Error llminfer::runMetal(int argc, char **argv) {
+namespace {
+void printUsage(std::ostream &out) {
+  out << "Usage: llmi-run <model.llmi> <token[,token...]>... [--capacity N] "
+         "[--logits none|last|all] [--plan]\n";
+}
+
+Error run(int argc, char **argv) {
   uint64_t tokens = 0, capacity = 0;
   LogitsMode mode = LogitsMode::Last;
   bool tracePlan = false;
   CacheLineAlignedVector<CacheLineAlignedVector<uint32_t>> chunks;
-  for (int i = 3; i < argc; ++i) {
+  for (int i = 2; i < argc; ++i) {
     std::string_view argument = argv[i];
     if (argument == "--plan") {
       tracePlan = true;
@@ -54,7 +60,7 @@ Error llminfer::runMetal(int argc, char **argv) {
   if (tokens > capacity)
     return Error("Token chunks exceed session capacity");
 
-  auto session = MetalSession::open(argv[2], capacity);
+  auto session = MetalSession::open(argv[1], capacity);
   if (!session)
     return session.getError();
   for (const auto &chunk : chunks) {
@@ -76,4 +82,21 @@ Error llminfer::runMetal(int argc, char **argv) {
     std::cout << output.dump() << '\n';
   }
   return {};
+}
+} // namespace
+
+int main(int argc, char **argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--help") {
+    printUsage(std::cout);
+    return EXIT_SUCCESS;
+  }
+  if (argc < 3) {
+    printUsage(std::cerr);
+    return EXIT_FAILURE;
+  }
+  if (auto error = run(argc, argv)) {
+    std::cerr << "llmi-run: " << error.getMessage() << '\n';
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
 }

@@ -280,7 +280,7 @@ def compare_partitions(full, chunked):
 
 
 def run_graph(cli, model, chunks, mode, *, plan=False):
-    args = [cli, "run", model, "--logits", mode]
+    args = [cli, model, "--logits", mode]
     if plan:
         args.append("--plan")
     args.extend(",".join(map(str, chunk)) for chunk in chunks)
@@ -298,9 +298,9 @@ def run_graph(cli, model, chunks, mode, *, plan=False):
     return steps
 
 
-def test_graph_lowering(cli, model, reference, tokens, quantized=False):
+def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False):
     chunks = [tokens[:2], tokens[2:3], tokens[3:]]
-    steps = run_graph(cli, model, chunks, "all")
+    steps = run_graph(run_cli, model, chunks, "all")
     pieces = []
     for step, expected in zip(steps, reference.run(chunks)):
         logits = torch.tensor(step["logits"])
@@ -310,7 +310,7 @@ def test_graph_lowering(cli, model, reference, tokens, quantized=False):
         pieces.append(logits)
     joined = torch.cat(pieces)
 
-    full = run_graph(cli, model, [tokens], "all", plan=True)[0]
+    full = run_graph(run_cli, model, [tokens], "all", plan=True)[0]
     torch.testing.assert_close(torch.tensor(full["logits"]), joined, atol=1e-5, rtol=1e-5)
     lowered = full["dispatches"]
     assert len(lowered) == full["dispatch_count"]
@@ -326,12 +326,12 @@ def test_graph_lowering(cli, model, reference, tokens, quantized=False):
     linear = "linearW8A8" if quantized else "linearF16"
     assert lowered[-1]["kernel"] == linear
 
-    last = run_graph(cli, model, [tokens], "last")[0]
+    last = run_graph(run_cli, model, [tokens], "last")[0]
     torch.testing.assert_close(
         torch.tensor(last["logits"]), joined[-reference.config.vocab_size:],
         atol=1e-5, rtol=1e-5,
     )
-    skipped = run_graph(cli, model, chunks, "none")[-1]
+    skipped = run_graph(run_cli, model, chunks, "none")[-1]
     assert skipped["dispatch_count"] < steps[-1]["dispatch_count"]
 
 
@@ -339,12 +339,15 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("converter", type=Path)
     parser.add_argument("reference_cli", type=Path)
+    parser.add_argument("--run-cli", type=Path)
     parser.add_argument("--allow-skip", action="store_true")
     parser.add_argument("--hf-model", type=Path)
     parser.add_argument("--fp16-model", type=Path)
     args = parser.parse_args()
     if bool(args.hf_model) != bool(args.fp16_model):
         parser.error("--hf-model and --fp16-model must be provided together")
+    if args.run_cli is None:
+        args.run_cli = args.converter.with_name("llmi-run")
     return args
 
 
@@ -384,12 +387,14 @@ def main(args):
                                [tokens[:2], tokens[2:3], tokens[3:8], tokens[8:]])
             compare_partitions(full, chunked)
             run_case(args.reference_cli, reference, model, [[36], [1]])
-            test_graph_lowering(args.converter, model, reference, tokens)
+            test_graph_lowering(args.converter, args.run_cli, model, reference, tokens)
 
             w8_model = Path(directory) / "tiny-w8.llmi"
             command([args.converter, "convert", checkpoint, w8_model])
             reference.use_w8_weights(args.converter, w8_model)
-            test_graph_lowering(args.converter, w8_model, reference, tokens, quantized=True)
+            test_graph_lowering(
+                args.converter, args.run_cli, w8_model, reference, tokens, quantized=True
+            )
 
 
 if __name__ == "__main__":

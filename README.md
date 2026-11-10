@@ -37,10 +37,10 @@ build/llmi graph build/qwen3.5-4b.llmi --tokens 1 --past 80 --json
 
 ## 执行 GraphIR
 
-macOS 上用 `llmi run` 执行 FP16 或 W8A8 模型。每个逗号分隔的 token ID 列表是一段 chunk。所有 chunk 共用同一会话和缓存。
+macOS 上用独立工具 `llmi-run` 执行 FP16 或 W8A8 模型。每个逗号分隔的 token ID 列表是一段 chunk。所有 chunk 共用同一会话和缓存。
 
 ```sh
-build/llmi run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
+build/llmi-run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
 ```
 
 每个 chunk 输出一行 JSON，包含累计已处理 token 数 `past`、词表 logits、dispatch 数和临时缓冲区字节数。`--logits last` 是默认值，`all` 返回每个输入 token 的 logits，`none` 用于仅推进状态。`--plan` 还输出每个 dispatch 的 `kernel` 和 `op_index`，后者对应相同输入形状下 `llmi graph --json` 的 `ops` 下标。
