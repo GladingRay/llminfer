@@ -24,6 +24,7 @@ enum : unsigned {
 
 struct LinearW8Params {
   unsigned outputWidth, firstRow, groups, rows, columns;
+  unsigned epilogue = 0, epilogueBlock = 0;
 };
 
 struct L2Params {

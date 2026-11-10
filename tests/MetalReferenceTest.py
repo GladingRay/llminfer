@@ -345,12 +345,22 @@ def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False)
     ]))
     indices = [dispatch["op_index"] for dispatch in lowered]
     assert indices == sorted(indices)
-    assert set(indices) == {
+    fused_indices = {d["fused_op_index"] for d in lowered if "epilogue" in d}
+    assert set(indices) | fused_indices == {
         i for i, op in enumerate(model_graph["ops"]) if op["kind"] not in ("Reshape", "Slice")
     }
     assert any(dispatch["kernel"] == "copyHalfView" for dispatch in lowered)
     linear = "linearW8A8Gemm" if quantized else "linearF16"
     assert lowered[-1]["kernel"] == linear
+    for step in [full, *steps]:
+        dispatches = step["dispatches"]
+        assert sorted(d["epilogue"] for d in dispatches if "epilogue" in d) == [
+            "sigmoid", "sigmoid", "silu", "softplus_decay", "swiglu", "swiglu"
+        ]
+        assert not {"swiGlu", "deltaGates", "sigmoidMul"}.intersection(
+            d["kernel"] for d in dispatches
+        )
+        assert any(d["kernel"] == "siluF16" for d in dispatches)
     if quantized:
         assert [step["dispatches"][-1]["kernel"] for step in steps] == [
             "linearW8A8Gemm", "linearW8A8Gemv", "linearW8A8Gemm"

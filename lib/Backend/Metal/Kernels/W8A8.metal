@@ -29,7 +29,9 @@ kernel void linearW8A8Gemv(device const uint4 *activation [[buffer(0)]],
                            device const uint4 *weight [[buffer(2)]],
                            device const half *weightScales [[buffer(3)]],
                            device half *output [[buffer(4)]],
-                           constant LinearW8Params &p [[buffer(5)]],
+                           device const half *aux [[buffer(5)]],
+                           device const float *bias [[buffer(6)]],
+                           constant LinearW8Params &p [[buffer(7)]],
                            uint group [[threadgroup_position_in_grid]],
                            uint tid [[thread_index_in_threadgroup]],
                            uint simdWidth [[threads_per_simdgroup]]) {
@@ -50,8 +52,11 @@ kernel void linearW8A8Gemv(device const uint4 *activation [[buffer(0)]],
   }
   threadgroup float partials[linearW8WorkgroupSize];
   acc = reduceW8Column<linearW8GemvLanes>(acc, tid, simdWidth, partials);
-  if (lane == 0 && col < p.columns)
-    output[p.firstRow + col] = half(acc);
+  if (lane == 0 && col < p.columns) {
+    uint column = p.firstRow + col;
+    storeLinear(output, aux, bias, column, column, p.epilogue,
+                p.epilogueBlock, acc);
+  }
 }
 
 kernel void linearW8A8Gemm(device const uint4 *activation [[buffer(0)]],
@@ -59,7 +64,9 @@ kernel void linearW8A8Gemm(device const uint4 *activation [[buffer(0)]],
                            device const uint4 *weight [[buffer(2)]],
                            device const half *weightScales [[buffer(3)]],
                            device half *output [[buffer(4)]],
-                           constant LinearW8Params &p [[buffer(5)]],
+                           device const half *aux [[buffer(5)]],
+                           device const float *bias [[buffer(6)]],
+                           constant LinearW8Params &p [[buffer(7)]],
                            uint2 group [[threadgroup_position_in_grid]],
                            uint tid [[thread_index_in_threadgroup]],
                            uint simdWidth [[threads_per_simdgroup]]) {
@@ -96,9 +103,11 @@ kernel void linearW8A8Gemm(device const uint4 *activation [[buffer(0)]],
   threadgroup float4 partials[linearW8WorkgroupSize];
   acc = reduceW8Column<linearW8GemmLanes>(acc, tid, simdWidth, partials);
   if (lane == 0 && col < p.columns) {
+    uint column = p.firstRow + col;
 #pragma unroll
     for (uint r = 0; r < linearW8GemmRows; ++r)
       if (row + r < p.rows)
-        output[(row + r) * p.outputWidth + p.firstRow + col] = half(acc[r]);
+        storeLinear(output, aux, bias, (row + r) * p.outputWidth + column,
+                    column, p.epilogue, p.epilogueBlock, acc[r]);
   }
 }

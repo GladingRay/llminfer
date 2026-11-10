@@ -182,7 +182,9 @@ MetalExecutor::execute(const MetalExecutionPlan &plan,
   }
   if (tracePlan)
     for (const auto &dispatch : plan.dispatches)
-      result.dispatches.push_back({dispatch.opIndex, dispatch.kernel});
+      result.dispatches.push_back({dispatch.opIndex, dispatch.kernel,
+                                   dispatch.epilogue ? dispatch.epilogue : "",
+                                   dispatch.fusedOpIndex});
   return result;
 }
 } // namespace

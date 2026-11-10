@@ -243,9 +243,14 @@ Error run(int argc, char **argv) {
                 {"logits", std::move(result->logits)}};
     if (tracePlan) {
       auto dispatches = json::array();
-      for (const auto &dispatch : result->dispatches)
-        dispatches.push_back(
-            {{"op_index", dispatch.opIndex}, {"kernel", dispatch.kernel}});
+      for (const auto &dispatch : result->dispatches) {
+        json item{{"op_index", dispatch.opIndex}, {"kernel", dispatch.kernel}};
+        if (!dispatch.epilogue.empty()) {
+          item["epilogue"] = dispatch.epilogue;
+          item["fused_op_index"] = dispatch.fusedOpIndex;
+        }
+        dispatches.push_back(std::move(item));
+      }
       output["dispatches"] = std::move(dispatches);
     }
     std::cout << output.dump() << '\n';

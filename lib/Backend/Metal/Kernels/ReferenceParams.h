@@ -5,8 +5,19 @@ struct EmbedParams {
   unsigned tokens, hidden, firstRow, rowCount;
 };
 
+enum LinearEpilogue : unsigned {
+  LinearNone,
+  LinearSilu,
+  LinearSiluMul,
+  LinearSigmoidColumns,
+  LinearSiluF32,
+  LinearDeltaBeta,
+  LinearDeltaDecay,
+};
+
 struct LinearParams {
   unsigned tokens, inputWidth, outputWidth, firstRow, rowCount;
+  unsigned epilogue = LinearNone, epilogueBlock = 0;
 };
 
 struct RowParams {

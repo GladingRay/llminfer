@@ -129,7 +129,8 @@ Error llminfer::metal::benchmarkGemm(GemmShape shape, unsigned samples) {
     return timeDispatch(*context, grid.kernel,
                         {buffers->activation, buffers->activationScales,
                          buffers->weight, buffers->weightScales,
-                         buffers->output},
+                         buffers->output, buffers->activation,
+                         buffers->activation},
                         params, MTLSizeMake(grid.groupsX, grid.groupsY, 1),
                         MTLSizeMake(linearW8WorkgroupSize, 1, 1));
   };

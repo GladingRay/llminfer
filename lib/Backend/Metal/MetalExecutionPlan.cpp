@@ -57,6 +57,35 @@ struct Lifetime {
   BufferRef buffer;
 };
 
+struct ProjectionFusion {
+  LinearEpilogue kind = LinearNone;
+  size_t consumer = 0;
+  unsigned block = 0;
+
+  bool deferred() const {
+    return kind == LinearSilu || kind == LinearSiluMul ||
+           kind == LinearDeltaBeta || kind == LinearDeltaDecay;
+  }
+};
+
+const char *epilogueName(LinearEpilogue kind) {
+  switch (kind) {
+  case LinearSilu:
+  case LinearSiluF32:
+    return "silu";
+  case LinearSiluMul:
+    return "swiglu";
+  case LinearSigmoidColumns:
+  case LinearDeltaBeta:
+    return "sigmoid";
+  case LinearDeltaDecay:
+    return "softplus_decay";
+  case LinearNone:
+    return nullptr;
+  }
+  return nullptr;
+}
+
 class Lowering {
 public:
   Lowering(const Graph &graph, const ModelFile &model,
@@ -65,14 +94,17 @@ public:
       : graph(graph), model(model), weights(weights),
         maxBufferLength(maxBufferLength),
         flashAttentionSupported(flashAttentionSupported), step(graph.getStep()),
-        bindings(graph.getValues().size()) {}
+        bindings(graph.getValues().size()), fusions(graph.getOps().size()) {}
 
   Result<MetalExecutionPlan> run();
 
 private:
   Error prepareValues();
+  void prepareFusions();
   Error lower(const Operation &op);
   Error linear(const Operation &op);
+  Error linear(size_t producer, ValueId result, std::optional<ValueId> aux = {},
+               std::optional<ValueId> bias = {});
   Error embedding(const Operation &op);
   Error attention(const Operation &op);
 
@@ -82,6 +114,10 @@ private:
   const Shape &shape(ValueId id) const { return value(id).type.shape; }
   unsigned count(ValueId id) const {
     return static_cast<unsigned>(valueCounts[id.index]);
+  }
+  bool hasEpilogue(ValueId id, LinearEpilogue kind) const {
+    const auto &producer = value(ValueId{bindings[id.index].root}).definingOp;
+    return producer && fusions[*producer].kind == kind;
   }
 
   BufferRef allocate(uint64_t bytes, size_t lastUse);
@@ -118,6 +154,7 @@ private:
   bool flashAttentionSupported;
   StepShape step;
   CacheLineAlignedVector<Lifetime> bindings;
+  CacheLineAlignedVector<ProjectionFusion> fusions;
   CacheLineAlignedVector<uint64_t> valueCounts;
   CacheLineAlignedVector<size_t> slotLastUse;
   MetalExecutionPlan plan;
@@ -226,6 +263,7 @@ Error Lowering::prepareValues() {
       bindings[bindings[id.index].root].lastUse = i;
   for (auto id : graph.getOutputs())
     bindings[bindings[id.index].root].lastUse = graph.getOps().size();
+  prepareFusions();
 
   bool hasInput = false;
   for (size_t i = 0; i < values.size(); ++i) {
@@ -242,6 +280,109 @@ Error Lowering::prepareValues() {
   if (!hasInput)
     return Error("Missing token ID input");
   return failure;
+}
+
+void Lowering::prepareFusions() {
+  struct Uses {
+    size_t count = 0;
+    std::array<ValueId, 2> inputs{};
+  };
+  CacheLineAlignedVector<Uses> uses(bindings.size());
+  auto recordUse = [&](ValueId id) {
+    auto &use = uses[bindings[id.index].root];
+    if (use.count < use.inputs.size())
+      use.inputs[use.count] = id;
+    ++use.count;
+  };
+  const auto &ops = graph.getOps();
+  for (const auto &op : ops)
+    if (op.kind != OpKind::Slice && op.kind != OpKind::Reshape)
+      for (auto id : op.inputs)
+        recordUse(id);
+  for (auto id : graph.getOutputs())
+    recordUse(id);
+
+  auto projection = [&](ValueId id) -> std::optional<size_t> {
+    const auto &producer = value(id).definingOp;
+    if (producer && (ops[*producer].kind == OpKind::LinearF16 ||
+                     ops[*producer].kind == OpKind::LinearW8A8))
+      return producer;
+    return {};
+  };
+  auto soleProjection = [&](ValueId id) -> std::optional<size_t> {
+    if (uses[id.index].count == 1)
+      return projection(id);
+    return {};
+  };
+  auto fuse = [&](size_t producer, size_t consumer, LinearEpilogue kind,
+                  unsigned block = 0) {
+    auto &fusion = fusions[producer];
+    fusion = {kind, consumer, block};
+    if (fusion.deferred()) {
+      for (auto id : ops[producer].inputs) {
+        auto &source = bindings[bindings[id.index].root];
+        source.lastUse = std::max(source.lastUse, consumer);
+      }
+    }
+  };
+
+  for (size_t i = 0; i < ops.size(); ++i) {
+    const auto &op = ops[i];
+    switch (op.kind) {
+    case OpKind::Silu:
+    case OpKind::SiluMul:
+      if (auto producer = soleProjection(op.inputs[0]))
+        fuse(*producer, i,
+             op.kind == OpKind::Silu ? LinearSilu : LinearSiluMul);
+      break;
+    case OpKind::GatedRmsNorm:
+      if (auto producer = soleProjection(op.inputs[1]))
+        fuse(*producer, i, LinearSiluF32);
+      break;
+    case OpKind::DeltaGates: {
+      auto a = soleProjection(op.inputs[0]);
+      auto b = soleProjection(op.inputs[1]);
+      if (a && b) {
+        fuse(*a, i, LinearDeltaDecay);
+        fuse(*b, i, LinearDeltaBeta);
+      }
+      break;
+    }
+    case OpKind::SigmoidMul: {
+      auto gate = op.inputs[0];
+      auto root = ValueId{bindings[gate.index].root};
+      auto producer = projection(root);
+      const auto &use = uses[root.index];
+      if (!producer || use.count != 2 || !value(gate).viewOf ||
+          !value(gate).definingOp)
+        break;
+      auto other = use.inputs[use.inputs[0].index == gate.index ? 1 : 0];
+      if (other.index == gate.index || !value(other).viewOf ||
+          value(other).viewOf->index != value(gate).viewOf->index ||
+          !value(other).definingOp)
+        break;
+      // Only the second half of each interleaved Q/gate head is activated.
+      auto packed = *value(gate).viewOf;
+      const auto &packedDesc = value(packed);
+      if (!packedDesc.viewOf || packedDesc.viewOf->index != root.index ||
+          packedDesc.type.shape.size() != 3 || !isContiguous(packedDesc))
+        break;
+      const auto *gateSlice =
+          std::get_if<SliceAttr>(&ops[*value(gate).definingOp].attributes);
+      const auto *querySlice =
+          std::get_if<SliceAttr>(&ops[*value(other).definingOp].attributes);
+      uint64_t width = packedDesc.type.shape[2];
+      if (gateSlice && querySlice && gateSlice->axis == 2 &&
+          querySlice->axis == 2 && gateSlice->begin == gateSlice->length &&
+          querySlice->begin == 0 && querySlice->length == gateSlice->length &&
+          width == 2 * gateSlice->length)
+        fuse(*producer, i, LinearSigmoidColumns, gateSlice->length);
+      break;
+    }
+    default:
+      break;
+    }
+  }
 }
 
 BufferRef Lowering::dense(ValueId id) {
@@ -292,12 +433,22 @@ Error Lowering::embedding(const Operation &op) {
 }
 
 Error Lowering::linear(const Operation &op) {
+  return linear(opIndex, op.outputs[0]);
+}
+
+Error Lowering::linear(size_t producer, ValueId result,
+                       std::optional<ValueId> aux,
+                       std::optional<ValueId> bias) {
+  const auto &op = graph.getOps()[producer];
+  const auto &fusion = fusions[producer];
   bool quantized = op.kind == OpKind::LinearW8A8;
   auto input = dense(op.inputs[0]);
   auto weight = dense(op.inputs[quantized ? 2 : 1]);
-  auto output = dense(op.outputs[0]);
-  unsigned rows = shape(op.outputs[0])[0];
-  unsigned width = shape(op.outputs[0])[1];
+  auto output = dense(result);
+  auto auxiliary = aux ? dense(*aux) : input;
+  auto biasBuffer = bias ? dense(*bias) : input;
+  unsigned rows = shape(result)[0];
+  unsigned width = shape(result)[1];
   const auto &shards = weights[weight.index];
   for (size_t i = 0; i < shards.size(); ++i) {
     unsigned first = shards[i].firstRow, cols = shards[i].rowCount;
@@ -310,16 +461,25 @@ Error Lowering::linear(const Operation &op) {
                 dense(op.inputs[1]),
                 weight,
                 {BufferSpace::Scale, weight.index, i},
-                output},
-               LinearW8Params{width, first, groups, rows, cols}, launch.groupsX,
-               launch.groupsY, linearW8WorkgroupSize, 1);
+                output,
+                auxiliary,
+                biasBuffer},
+               LinearW8Params{width, first, groups, rows, cols, fusion.kind,
+                              fusion.block},
+               launch.groupsX, launch.groupsY, linearW8WorkgroupSize, 1);
     } else {
       unsigned inputWidth = shape(op.inputs[0])[1];
-      dispatch("linearF16", {input, weight, output},
-               LinearParams{rows, inputWidth, width, first, cols},
+      dispatch("linearF16", {input, weight, output, auxiliary, biasBuffer},
+               LinearParams{rows, inputWidth, width, first, cols, fusion.kind,
+                            fusion.block},
                (uint64_t(cols) + linearTile - 1) / linearTile,
                (uint64_t(rows) + linearTile - 1) / linearTile, linearTile,
                linearTile);
+    }
+    if (!failure && fusion.kind != LinearNone) {
+      plan.dispatches.back().epilogue = epilogueName(fusion.kind);
+      plan.dispatches.back().fusedOpIndex =
+          producer == opIndex ? fusion.consumer : producer;
     }
   }
   return failure;
@@ -404,7 +564,8 @@ Error Lowering::lower(const Operation &op) {
                {dense(inputs[0]), dense(inputs[1]), dense(outputs[0])}, params,
                rows);
     else
-      dispatch("gatedRmsNorm",
+      dispatch(hasEpilogue(inputs[1], LinearSiluF32) ? "gatedRmsNormActivated"
+                                                     : "gatedRmsNorm",
                {dense(inputs[0]), dense(inputs[1]), dense(inputs[2]),
                 dense(outputs[0])},
                params, rows);
@@ -420,16 +581,22 @@ Error Lowering::lower(const Operation &op) {
   case OpKind::Add:
   case OpKind::SiluMul:
   case OpKind::SigmoidMul: {
+    if (op.kind == OpKind::SiluMul && hasEpilogue(inputs[0], LinearSiluMul))
+      return linear(*value(inputs[0]).definingOp, outputs[0], inputs[1]);
     unsigned size = count(outputs[0]);
-    const char *kernel =
-        op.kind == OpKind::Add
-            ? "residualAdd"
-            : (op.kind == OpKind::SiluMul ? "swiGlu" : "sigmoidMul");
+    const char *kernel = "residualAdd";
+    if (op.kind == OpKind::SiluMul)
+      kernel = "swiGlu";
+    else if (op.kind == OpKind::SigmoidMul)
+      kernel = hasEpilogue(inputs[0], LinearSigmoidColumns) ? "multiplyF16"
+                                                            : "sigmoidMul";
     dispatch(kernel, {dense(inputs[0]), dense(inputs[1]), dense(outputs[0])},
              ElementParams{size}, size);
     break;
   }
   case OpKind::Silu: {
+    if (hasEpilogue(inputs[0], LinearSilu))
+      return linear(*value(inputs[0]).definingOp, outputs[0]);
     unsigned size = count(outputs[0]);
     dispatch("siluF16", {dense(inputs[0]), dense(outputs[0])},
              ElementParams{size}, size);
@@ -457,6 +624,12 @@ Error Lowering::lower(const Operation &op) {
     break;
   }
   case OpKind::DeltaGates: {
+    if (hasEpilogue(inputs[0], LinearDeltaDecay)) {
+      if (auto error = linear(*value(inputs[0]).definingOp, outputs[1],
+                              inputs[2], inputs[3]))
+        return error;
+      return linear(*value(inputs[1]).definingOp, outputs[0]);
+    }
     unsigned rows = shape(inputs[0])[0], width = shape(inputs[0])[1];
     dispatch("deltaGates",
              {dense(inputs[0]), dense(inputs[1]), dense(inputs[2]),
@@ -496,6 +669,11 @@ Result<MetalExecutionPlan> Lowering::run() {
     return error;
 
   for (const auto &op : graph.getOps()) {
+    const auto &fusion = fusions[opIndex];
+    if (fusion.deferred()) {
+      ++opIndex;
+      continue;
+    }
     for (auto id : op.outputs) {
       const auto &desc = value(id);
       if (desc.viewOf)
@@ -505,8 +683,10 @@ Result<MetalExecutionPlan> Lowering::run() {
           stored > UINT32_MAX)
         return Error("Padded Metal tensor exceeds the 32-bit index range");
       auto &binding = bindings[id.index];
-      binding.buffer =
-          allocate(stored * elementBytes(desc.type.element), binding.lastUse);
+      unsigned bytes = fusion.kind == LinearSiluF32
+                           ? sizeof(float)
+                           : elementBytes(desc.type.element);
+      binding.buffer = allocate(stored * bytes, binding.lastUse);
     }
     if (auto error = lower(op))
       return Error("Lowering op " + std::to_string(opIndex) + " (" +

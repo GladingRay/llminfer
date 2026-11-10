@@ -11,6 +11,8 @@ namespace llminfer {
 struct MetalDispatchInfo {
   size_t opIndex;
   std::string_view kernel;
+  std::string_view epilogue;
+  size_t fusedOpIndex;
 };
 
 struct MetalStepResult {

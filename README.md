@@ -73,7 +73,7 @@ build/llmi-run decode /path/to/qwen3.5-4b/tokenizer.json 109266,3709,48,16451,61
 build/llmi-run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
 ```
 
-每个 chunk 输出一行 JSON，包含累计已处理 token 数 `past`、词表 logits、dispatch 数和临时缓冲区字节数。`--logits last` 是默认值，`all` 返回每个输入 token 的 logits，`none` 用于仅推进状态。`--plan` 还输出每个 dispatch 的 `kernel` 和 `op_index`，后者对应相同输入形状下 `llmi graph --json` 的 `ops` 下标。
+每个 chunk 输出一行 JSON，包含累计已处理 token 数 `past`、词表 logits、dispatch 数和临时缓冲区字节数。`--logits last` 是默认值，`all` 返回每个输入 token 的 logits，`none` 用于仅推进状态。`--plan` 还输出每个 dispatch 的 `kernel` 和 `op_index`，后者对应相同输入形状下 `llmi graph --json` 的 `ops` 下标。带融合写回的投影另有 `epilogue` 和 `fused_op_index` 字段。
 
 ## 模型吞吐基准
 

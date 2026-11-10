@@ -11,6 +11,41 @@ static float stableSoftplus(float x) {
   return max(x, 0.0f) + tail;
 }
 
+static void storeLinear(device half *output, device const half *aux,
+                        device const float *bias, uint i, uint col,
+                        uint epilogue, uint block, float accumulator) {
+  // Preserve the rounding boundary of the unfused projection.
+  half projected = half(accumulator);
+  switch (epilogue) {
+  case LinearSilu:
+    projected = half(silu(float(projected)));
+    break;
+  case LinearSiluMul:
+    projected = half(float(half(silu(float(projected)))) * float(aux[i]));
+    break;
+  case LinearSigmoidColumns:
+    if ((col / block) % 2 != 0)
+      projected = half(logistic(float(projected)));
+    break;
+  case LinearSiluF32:
+    reinterpret_cast<device float *>(output)[i] = silu(float(projected));
+    return;
+  case LinearDeltaBeta:
+    reinterpret_cast<device float *>(output)[i] =
+        float(half(logistic(float(projected))));
+    return;
+  case LinearDeltaDecay: {
+    device const float *aLog = reinterpret_cast<device const float *>(aux);
+    reinterpret_cast<device float *>(output)[i] =
+        exp(-exp(aLog[col]) * stableSoftplus(float(projected) + bias[col]));
+    return;
+  }
+  default:
+    break;
+  }
+  output[i] = projected;
+}
+
 kernel void embedding(device const uint *ids [[buffer(0)]],
                       device const half *weight [[buffer(1)]],
                       device half *output [[buffer(2)]],
@@ -26,7 +61,9 @@ kernel void embedding(device const uint *ids [[buffer(0)]],
 kernel void linearF16(device const half *input [[buffer(0)]],
                       device const half *weight [[buffer(1)]],
                       device half *output [[buffer(2)]],
-                      constant LinearParams &p [[buffer(3)]],
+                      device const half *aux [[buffer(3)]],
+                      device const float *bias [[buffer(4)]],
+                      constant LinearParams &p [[buffer(5)]],
                       uint2 group [[threadgroup_position_in_grid]],
                       uint2 local [[thread_position_in_threadgroup]]) {
   constexpr uint tile = 16;
@@ -51,8 +88,11 @@ kernel void linearF16(device const half *input [[buffer(0)]],
           fma(float(inputTile[local.y][k]), float(weightTile[k][local.x]), acc);
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  if (row < p.tokens && col < p.rowCount)
-    output[row * p.outputWidth + p.firstRow + col] = half(acc);
+  if (row < p.tokens && col < p.rowCount) {
+    uint column = p.firstRow + col;
+    storeLinear(output, aux, bias, row * p.outputWidth + column, column,
+                p.epilogue, p.epilogueBlock, acc);
+  }
 }
 
 static float rmsScale(device const half *x, uint width, float epsilon) {
@@ -185,20 +225,37 @@ kernel void deltaUpdate(
   }
 }
 
-kernel void gatedRmsNorm(device const half *input [[buffer(0)]],
-                         device const half *gate [[buffer(1)]],
-                         device const float *weight [[buffer(2)]],
-                         device half *output [[buffer(3)]],
-                         constant RowParams &p [[buffer(4)]],
-                         uint row [[thread_position_in_grid]]) {
+template <typename Gate>
+static void applyGatedRmsNorm(device const half *input, device const Gate *gate,
+                              device const float *weight, device half *output,
+                              constant RowParams &p, uint row, bool activated) {
   if (row >= p.rows)
     return;
   uint offset = row * p.width;
   float scale = rmsScale(input + offset, p.width, p.epsilon);
   for (uint i = 0; i < p.width; ++i) {
     float norm = float(half(float(input[offset + i]) * scale)) * weight[i];
-    output[offset + i] = half(norm * silu(float(gate[offset + i])));
+    float value = float(gate[offset + i]);
+    output[offset + i] = half(norm * (activated ? value : silu(value)));
   }
+}
+
+kernel void gatedRmsNorm(device const half *input [[buffer(0)]],
+                         device const half *gate [[buffer(1)]],
+                         device const float *weight [[buffer(2)]],
+                         device half *output [[buffer(3)]],
+                         constant RowParams &p [[buffer(4)]],
+                         uint row [[thread_position_in_grid]]) {
+  applyGatedRmsNorm(input, gate, weight, output, p, row, false);
+}
+
+kernel void gatedRmsNormActivated(device const half *input [[buffer(0)]],
+                                  device const float *gate [[buffer(1)]],
+                                  device const float *weight [[buffer(2)]],
+                                  device half *output [[buffer(3)]],
+                                  constant RowParams &p [[buffer(4)]],
+                                  uint row [[thread_position_in_grid]]) {
+  applyGatedRmsNorm(input, gate, weight, output, p, row, true);
 }
 
 static half2 rotatePair(half inputX, half inputY, float position, float theta,

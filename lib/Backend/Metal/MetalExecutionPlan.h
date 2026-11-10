@@ -27,6 +27,8 @@ struct Dispatch {
   std::array<uint8_t, 64> params;
   size_t paramSize;
   unsigned groupsX, groupsY, threadsX, threadsY;
+  const char *epilogue = nullptr;
+  size_t fusedOpIndex = 0;
 };
 
 struct MetalExecutionPlan {

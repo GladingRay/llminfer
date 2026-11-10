@@ -84,6 +84,15 @@ kernel void sigmoidMul(device const half *gate [[buffer(0)]],
     output[i] = half(float(half(logistic(float(gate[i])))) * float(input[i]));
 }
 
+kernel void multiplyF16(device const half *lhs [[buffer(0)]],
+                        device const half *rhs [[buffer(1)]],
+                        device half *output [[buffer(2)]],
+                        constant ElementParams &p [[buffer(3)]],
+                        uint i [[thread_position_in_grid]]) {
+  if (i < p.count)
+    output[i] = half(float(lhs[i]) * float(rhs[i]));
+}
+
 kernel void l2NormF32(device const half *input [[buffer(0)]],
                       device float *output [[buffer(1)]],
                       constant L2Params &p [[buffer(2)]],

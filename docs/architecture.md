@@ -158,6 +158,18 @@ y     = qᵀ S1
 
 **MetalExecutionPlan** 按 SSA 顺序遍历已验证的图，将节点转换为 kernel、参数、线程组尺寸和缓冲区绑定。每条 dispatch 保留来源 op ID。Reshape 和 Slice 先绑定到原存储，消费者需要连续布局时插入 `copyHalfView`。临时缓冲区按别名根值的最后一次使用复用。大矩阵按行分片，输出投影和 embedding 共享权重缓冲区。当前每步使用精确的 `T`、`P` 和容量构建计划。形状桶和计划缓存留给后续优化。
 
+### 线性投影 epilogue
+
+Metal 降级层在安排临时缓冲区前识别可融合的激活消费者。FP16 GEMM 和 W8A8 GEMM/GEMV 共用 epilogue，并在寄存器中保留未融合路径的 FP16 舍入位置。`llmi-run --plan` 用 `epilogue` 和 `fused_op_index` 标记融合，GraphIR 仍描述逻辑算子。
+
+- MLP 在 gate 投影写回时执行 SiLU 并乘上 up 投影，直接写出 SwiGLU 结果，省去 gate 中间缓冲区和独立 dispatch。
+- GQA 的 `q_proj` 只对每个 head 的 gate 列执行 sigmoid。Q 列按原值写回，注意力输出再乘已激活的 gate。
+- DeltaNet 的 `a`、`b` 投影直接写出 FP32 decay 和 beta，省去独立的 `deltaGates` dispatch。`z` 投影直接写出 FP32 SiLU 结果，供门控归一化使用。卷积输出的 SiLU 由卷积路径处理。
+
+融合推迟投影时会延长其输入的生命周期。多消费者的原始投影值需要保留时沿用独立 kernel。GQA 仅在识别出互补的 Q 和 gate 切片时融合。
+
+Apple M2 上用同一份 Qwen3.5-4B W8A8 权重比较启用与禁用融合。32 token prefill 的 dispatch 数从 869 降到 813，随后每步 decode 从 860 降到 804。Prefill 和后续两步 decode 的 logits 逐元素一致。交替运行三轮 32 prefill、8 decode 后，中位吞吐基本持平，prefill 为 19.85 → 19.79 tok/s，decode 为 9.90 → 9.88 tok/s。
+
 **MetalExecutor** 将计划编码成 `MTLComputeCommandEncoder` 命令。每条 dispatch 使用独立 encoder，Metal 跟踪共享缓冲区的依赖。每个 prefill chunk 或 decode step 提交一个 command buffer，CPU 在 chunk 末尾等待一次并读取 logits。W8A8 在 GPU 上对激活按 32 元素动态量化，执行分组 INT32 点积和 FP32 缩放求和。当前 FP16 和 W8A8 路径共用浮点 attention 与 DeltaNet 状态 kernel。GQA 的基线实现为每个 chunk 暂存 `T × query_heads × (P+T)` 个 FP16 分数，支持的 chunk 大小受单缓冲区上限约束。[Apple Metal compute encoder](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/)
 
 **MetalSession** 持有模型权重、卷积历史、递归状态和 KV cache。进入 step 前校验 token 和容量，按本次输入构建 GraphIR 并核对状态布局。成功完成后才推进已处理长度 `P`。GPU 提交后出现错误会使会话失效，`reset()` 清零状态和位置。跨会话共享权重属于后续运行时扩展。

@@ -229,8 +229,9 @@ struct MetalReferenceGraph::Impl {
     for (const auto &slice : weight->slices) {
       LinearParams params{tokens, weight->width, weight->rows, slice.firstRow,
                           slice.rowCount};
-      command.dispatchMatrix("linearF16", {input, slice.buffer, output}, params,
-                             tokens, slice.rowCount);
+      command.dispatchMatrix("linearF16",
+                             {input, slice.buffer, output, input, input},
+                             params, tokens, slice.rowCount);
     }
     return output;
   }
