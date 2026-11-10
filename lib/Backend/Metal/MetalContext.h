@@ -43,7 +43,7 @@ public:
   void dispatch(const char *name, std::initializer_list<Buffer> buffers,
                 const Params &params, uint64_t threads) {
     constexpr unsigned width = 64;
-    encode(name, buffers, &params, sizeof(params),
+    encode(name, buffers.begin(), buffers.size(), &params, sizeof(params),
            MTLSizeMake((threads + width - 1) / width, 1, 1),
            MTLSizeMake(width, 1, 1));
   }
@@ -53,7 +53,7 @@ public:
                       const Params &params, unsigned rows, unsigned columns) {
     constexpr uint64_t tile = 16;
     encode(
-        name, buffers, &params, sizeof(params),
+        name, buffers.begin(), buffers.size(), &params, sizeof(params),
         MTLSizeMake((columns + tile - 1) / tile, (rows + tile - 1) / tile, 1),
         MTLSizeMake(tile, tile, 1));
   }
@@ -61,11 +61,11 @@ public:
   /// Sets submitted if the GPU may have mutated persistent state.
   Error finish(bool &submitted);
 
-private:
-  void encode(const char *name, std::initializer_list<Buffer> buffers,
+  void encode(const char *name, const Buffer *buffers, size_t bufferCount,
               const void *params, size_t paramsSize, MTLSize groups,
               MTLSize threads);
 
+private:
   MetalContext &context;
   id<MTLCommandBuffer> commandBuffer;
   Error failure;

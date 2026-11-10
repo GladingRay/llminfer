@@ -19,7 +19,7 @@ struct ElementParams {
 };
 
 struct ConvParams {
-  unsigned tokens, channels, kernelSize;
+  unsigned tokens, channels, kernelSize, applySilu;
 };
 
 struct DeltaNormParams {

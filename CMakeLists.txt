@@ -45,7 +45,7 @@ add_executable(llmi
   tools/modelconverter/Safetensors.cpp
 )
 target_include_directories(llmi PRIVATE lib/ModelFormat)
-target_link_libraries(llmi PRIVATE llminfer_qwen35_builder nlohmann_json::nlohmann_json)
+target_link_libraries(llmi PRIVATE nlohmann_json::nlohmann_json)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   enable_language(OBJCXX)
@@ -53,31 +53,55 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
   set(CMAKE_OBJCXX_EXTENSIONS OFF)
 
-  set(METAL_REFERENCE_KERNELS "${CMAKE_CURRENT_SOURCE_DIR}/lib/Backend/Metal/Kernels")
+  set(METAL_KERNELS "${CMAKE_CURRENT_SOURCE_DIR}/lib/Backend/Metal/Kernels")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${METAL_REFERENCE_KERNELS}/ReferenceParams.h"
-    "${METAL_REFERENCE_KERNELS}/Reference.metal")
-  file(READ "${METAL_REFERENCE_KERNELS}/ReferenceParams.h" REFERENCE_PARAMS)
-  file(READ "${METAL_REFERENCE_KERNELS}/Reference.metal" REFERENCE_MSL)
-  configure_file("${METAL_REFERENCE_KERNELS}/ReferenceSource.h.in"
-                 "generated/ReferenceSource.h" @ONLY)
+    "${METAL_KERNELS}/ReferenceParams.h"
+    "${METAL_KERNELS}/Reference.metal"
+    "${METAL_KERNELS}/GraphParams.h"
+    "${METAL_KERNELS}/Graph.metal")
+  file(READ "${METAL_KERNELS}/ReferenceParams.h" REFERENCE_PARAMS)
+  file(READ "${METAL_KERNELS}/Reference.metal" REFERENCE_MSL)
+  file(READ "${METAL_KERNELS}/GraphParams.h" GRAPH_PARAMS)
+  file(READ "${METAL_KERNELS}/Graph.metal" GRAPH_MSL)
+  configure_file("${METAL_KERNELS}/KernelSource.h.in"
+                 "generated/KernelSource.h" @ONLY)
 
   find_library(METAL_FRAMEWORK Metal REQUIRED)
   find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
-  add_library(llminfer_metal_reference
-    lib/Backend/Metal/MetalContext.mm
-    lib/Models/Qwen35/MetalReferenceGraph.mm)
+  add_library(llminfer_metal_context lib/Backend/Metal/MetalContext.mm)
+  target_compile_options(llminfer_metal_context PRIVATE
+    -fobjc-arc -fno-exceptions -fno-objc-exceptions)
+  target_include_directories(llminfer_metal_context PRIVATE
+    include "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  target_link_libraries(llminfer_metal_context PRIVATE
+    "${METAL_FRAMEWORK}" "${FOUNDATION_FRAMEWORK}")
+
+  add_library(llminfer_metal_reference lib/Models/Qwen35/MetalReferenceGraph.mm)
   target_compile_options(llminfer_metal_reference PRIVATE
     -fobjc-arc -fno-exceptions -fno-objc-exceptions)
   target_include_directories(llminfer_metal_reference PUBLIC include PRIVATE
-    lib/Backend/Metal lib/ModelFormat "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    lib/Backend/Metal lib/ModelFormat)
   target_link_libraries(llminfer_metal_reference PRIVATE
-    llminfer_model_format nlohmann_json::nlohmann_json
-    "${METAL_FRAMEWORK}" "${FOUNDATION_FRAMEWORK}")
+    llminfer_metal_context llminfer_model_format nlohmann_json::nlohmann_json)
+
+  add_library(llminfer_metal
+    lib/Backend/Metal/MetalExecutionPlan.cpp
+    lib/Backend/Metal/MetalExecutor.mm)
+  target_compile_options(llminfer_metal PRIVATE
+    "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc;-fno-exceptions;-fno-objc-exceptions>")
+  target_include_directories(llminfer_metal PUBLIC include)
+  target_link_libraries(llminfer_metal
+    PUBLIC llminfer_qwen35_builder
+    PRIVATE llminfer_metal_context)
+  target_sources(llmi PRIVATE tools/modelconverter/RunCommand.cpp)
+  target_compile_definitions(llmi PRIVATE LLMINFER_HAS_METAL)
+  target_link_libraries(llmi PRIVATE llminfer_metal)
 
   add_executable(llmi-reference tools/reference/Main.cpp)
   target_link_libraries(llmi-reference PRIVATE
     llminfer_metal_reference nlohmann_json::nlohmann_json)
+else()
+  target_link_libraries(llmi PRIVATE llminfer_qwen35_builder)
 endif()
 
 include(CTest)

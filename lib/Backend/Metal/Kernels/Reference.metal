@@ -111,7 +111,7 @@ kernel void causalConv(device const half *input [[buffer(0)]],
     float acc = float(current) * float(filter[historySize]);
     for (uint j = 0; j < historySize; ++j)
       acc = fma(float(recent[j]), float(filter[j]), acc);
-    output[i] = half(silu(float(half(acc))));
+    output[i] = p.applySilu ? half(silu(float(half(acc)))) : half(acc);
     if (historySize != 0) {
       for (uint j = 1; j < historySize; ++j)
         recent[j - 1] = recent[j];
@@ -139,6 +139,23 @@ kernel void deltaQkNorm(device const half *qkv [[buffer(0)]],
     normalized[row * p.keyDim + i] = float(input[i]) * scale;
 }
 
+static half updateDeltaColumn(device const float *q, device const float *k,
+                              float v, float beta, float decay,
+                              device float *column, uint keys, uint stride) {
+  float prediction = 0.0f;
+  for (uint i = 0; i < keys; ++i)
+    prediction = fma(column[i * stride] * decay, k[i], prediction);
+  float delta = (v - prediction) * beta;
+  float y = 0.0f;
+  for (uint i = 0; i < keys; ++i) {
+    uint index = i * stride;
+    float next = fma(k[i], delta, column[index] * decay);
+    column[index] = next;
+    y = fma(next, q[i], y);
+  }
+  return half(y);
+}
+
 kernel void deltaUpdate(
     device const half *qkv [[buffer(0)]], device const float *qk [[buffer(1)]],
     device const half *a [[buffer(2)]], device const half *b [[buffer(3)]],
@@ -162,19 +179,9 @@ kernel void deltaUpdate(
     float beta = float(half(logistic(float(b[gateIndex]))));
     device const float *q = qk + 2 * t * keyWidth + keyHead * p.keyDim;
     device const float *k = q + keyWidth;
-    float prediction = 0.0f;
-    for (uint i = 0; i < p.keyDim; ++i)
-      prediction = fma(stateColumn[i * p.valueDim] * decay, k[i], prediction);
     float v = float(qkv[t * p.qkvWidth + 2 * keyWidth + column]);
-    float delta = (v - prediction) * beta;
-    float y = 0.0f;
-    for (uint i = 0; i < p.keyDim; ++i) {
-      uint index = i * p.valueDim;
-      float next = fma(k[i], delta, stateColumn[index] * decay);
-      stateColumn[index] = next;
-      y = fma(next, q[i], y);
-    }
-    output[t * valueWidth + column] = half(y);
+    output[t * valueWidth + column] = updateDeltaColumn(
+        q, k, v, beta, decay, stateColumn, p.keyDim, p.valueDim);
   }
 }
 
@@ -194,6 +201,16 @@ kernel void gatedRmsNorm(device const half *input [[buffer(0)]],
   }
 }
 
+static half2 rotatePair(half inputX, half inputY, float position, float theta,
+                        uint pair, uint rotaryWidth) {
+  float phase = position / pow(theta, 2.0f * float(pair) / float(rotaryWidth));
+  float cosine = float(half(cos(phase)));
+  float sine = float(half(sin(phase)));
+  float x = float(inputX), y = float(inputY);
+  return half2(half(float(half(x * cosine)) - float(half(y * sine))),
+               half(float(half(y * cosine)) + float(half(x * sine))));
+}
+
 kernel void normRope(device const half *input [[buffer(0)]],
                      device const float *weight [[buffer(1)]],
                      device half *output [[buffer(2)]],
@@ -207,14 +224,12 @@ kernel void normRope(device const half *input [[buffer(0)]],
   uint rotaryHalf = p.rotaryDim / 2;
   float position = float(p.past + row / p.heads);
   for (uint i = 0; i < rotaryHalf; ++i) {
-    float x = float(half(float(head[i]) * scale * (1.0f + weight[i])));
     uint j = i + rotaryHalf;
-    float y = float(half(float(head[j]) * scale * (1.0f + weight[j])));
-    float phase = position / pow(p.theta, 2.0f * float(i) / float(p.rotaryDim));
-    float cosPhase = float(half(cos(phase)));
-    float sinPhase = float(half(sin(phase)));
-    out[i] = half(float(half(x * cosPhase)) - float(half(y * sinPhase)));
-    out[j] = half(float(half(y * cosPhase)) + float(half(x * sinPhase)));
+    half x = half(float(head[i]) * scale * (1.0f + weight[i]));
+    half y = half(float(head[j]) * scale * (1.0f + weight[j]));
+    half2 rotated = rotatePair(x, y, position, p.theta, i, p.rotaryDim);
+    out[i] = rotated.x;
+    out[j] = rotated.y;
   }
   for (uint i = p.rotaryDim; i < p.headDim; ++i)
     out[i] = half(float(head[i]) * scale * (1.0f + weight[i]));
@@ -250,12 +265,9 @@ kernel void gqaScores(device const half *query [[buffer(0)]],
   scores[i] = half(float(half(dotProduct)) * rsqrt(float(p.headDim)));
 }
 
-kernel void gqaApply(device const half *scores [[buffer(0)]],
-                     device const half *values [[buffer(1)]],
-                     device const half *projectedQ [[buffer(2)]],
-                     device half *output [[buffer(3)]],
-                     constant GqaParams &p [[buffer(4)]],
-                     uint row [[thread_position_in_grid]]) {
+static void applyGqa(device const half *scores, device const half *values,
+                     device const half *projectedQ, device half *output,
+                     constant GqaParams &p, uint row) {
   if (row >= p.tokens * p.queryHeads)
     return;
   uint count = p.past + row / p.queryHeads + 1;
@@ -268,7 +280,7 @@ kernel void gqaApply(device const half *scores [[buffer(0)]],
   for (uint i = 0; i < count; ++i)
     sum += exp(float(logits[i]) - maxLogit);
   uint kvHead = (row % p.queryHeads) / (p.queryHeads / p.kvHeads);
-  device const half *gate = projectedQ + (2 * row + 1) * p.headDim;
+
   for (uint d = 0; d < p.headDim; ++d) {
     float result = 0.0f;
     for (uint i = 0; i < count; ++i) {
@@ -277,7 +289,20 @@ kernel void gqaApply(device const half *scores [[buffer(0)]],
           fma(float(prob),
               float(values[(i * p.kvHeads + kvHead) * p.headDim + d]), result);
     }
-    output[row * p.headDim + d] =
-        half(float(half(result)) * float(half(logistic(float(gate[d])))));
+    half value = half(result);
+    if (projectedQ) {
+      half gate = projectedQ[(2 * row + 1) * p.headDim + d];
+      value = half(float(value) * float(half(logistic(float(gate)))));
+    }
+    output[row * p.headDim + d] = value;
   }
+}
+
+kernel void gqaApply(device const half *scores [[buffer(0)]],
+                     device const half *values [[buffer(1)]],
+                     device const half *projectedQ [[buffer(2)]],
+                     device half *output [[buffer(3)]],
+                     constant GqaParams &p [[buffer(4)]],
+                     uint row [[thread_position_in_grid]]) {
+  applyGqa(scores, values, projectedQ, output, p, row);
 }

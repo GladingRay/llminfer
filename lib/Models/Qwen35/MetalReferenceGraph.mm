@@ -276,7 +276,7 @@ struct MetalReferenceGraph::Impl {
     command.dispatch("causalConv",
                      {qkv, denseWeight(command, prefix + "conv1d.weight"),
                       convHistory, conv},
-                     ConvParams{tokens, c.deltaQkvWidth, c.convKernel},
+                     ConvParams{tokens, c.deltaQkvWidth, c.convKernel, 1},
                      c.deltaQkvWidth);
 
     uint64_t qkRows = 2 * uint64_t(tokens) * c.keyHeads;

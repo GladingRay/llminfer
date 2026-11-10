@@ -1,0 +1,34 @@
+#ifndef LLMINFER_BACKEND_METAL_GRAPHPARAMS_H
+#define LLMINFER_BACKEND_METAL_GRAPHPARAMS_H
+
+struct HalfViewParams {
+  unsigned count, offset, dims[3], strides[3];
+};
+
+struct GroupedEmbedParams {
+  unsigned tokens, hidden, firstRow, rowCount, groups;
+};
+
+struct QuantizeParams {
+  unsigned rows, width, groups;
+};
+
+struct LinearW8Params {
+  unsigned outputWidth, firstRow, groups;
+};
+
+struct L2Params {
+  unsigned rows, width;
+  float epsilon, scale;
+};
+
+struct PartialRopeParams {
+  unsigned rows, heads, width, rotaryWidth, past;
+  float theta;
+};
+
+struct GraphDeltaParams {
+  unsigned tokens, keyHeads, keyDim, valueHeads, valueDim;
+};
+
+#endif

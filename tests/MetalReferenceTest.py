@@ -1,4 +1,5 @@
 import argparse
+from functools import partial
 import importlib.metadata
 import json
 from pathlib import Path
@@ -83,6 +84,20 @@ def make_tiny_checkpoint(path):
     }))
 
 
+def quantized_linear(input, weight):
+    data, weight_scales, width = weight
+    rows = input.reshape(-1, width).float()
+    groups = data.size(1)
+    grouped = torch.nn.functional.pad(rows, (0, 32 * groups - width))
+    grouped = grouped.reshape(rows.size(0), groups, 32)
+    maximum = grouped.abs().amax(dim=-1)
+    scales = torch.where(maximum > 0, maximum / 127, 1.0)
+    quantized = torch.round(grouped / scales[..., None]).clamp(-127, 127).int()
+    dots = (quantized[:, None] * data[None]).sum(dim=-1, dtype=torch.int32)
+    result = (dots.float() * scales[:, None] * weight_scales[None]).sum(dim=-1)
+    return result.half().reshape(*input.shape[:-1], data.size(0))
+
+
 class TransformersReference:
     def __init__(self, path):
         text = json.loads((path / "config.json").read_text())["text_config"]
@@ -119,6 +134,37 @@ class TransformersReference:
         self.norm = Qwen3_5RMSNorm(self.config.hidden_size, self.config.rms_norm_eps)
         self.norm.load_state_dict({"weight": read_weight("norm.weight")})
         self.rope = Qwen3_5TextRotaryEmbedding(self.config)
+        self.lm_head = lambda x: torch.nn.functional.linear(x, self.embedding)
+
+    def use_w8_weights(self, cli, model):
+        weights = {}
+        metadata = json.loads(command([cli, "inspect", model, "--json"]))
+        with model.open("rb") as file:
+            for entry in metadata["tensors"]:
+                if entry["dtype"] != "I8":
+                    continue
+                rows, width = entry["shape"]
+                groups = entry["storage_shape"][1] // 32
+                file.seek(entry["data"]["offset"])
+                data = torch.frombuffer(
+                    bytearray(file.read(entry["data"]["size"])), dtype=torch.int8
+                ).int().reshape(rows, groups, 32)
+                file.seek(entry["scales"]["offset"])
+                scales = torch.frombuffer(
+                    bytearray(file.read(entry["scales"]["size"])), dtype=torch.float16
+                ).float().reshape(rows, groups)
+                weights[entry["id"]] = (data, scales, width)
+
+        data, scales, width = weights["embed_tokens.weight"]
+        self.embedding = (data.float() * scales[..., None]).reshape(data.size(0), -1)
+        self.embedding = self.embedding[:, :width].half()
+        self.lm_head = partial(quantized_linear, weight=weights["embed_tokens.weight"])
+        for index, layer in ((self.delta_index, self.delta), (self.gqa_index, self.gqa)):
+            for name, module in layer.named_modules():
+                if isinstance(module, torch.nn.Linear):
+                    module.forward = partial(
+                        quantized_linear, weight=weights[f"layers.{index}.{name}.weight"]
+                    )
 
     def run(self, chunks):
         def flat(value):
@@ -175,7 +221,7 @@ class TransformersReference:
                     "conv_history": flat(conv[..., conv.size(-1) - history:]),
                     "recurrent_state": flat(state),
                     "rotated_keys": flat(keys),
-                    "logits": flat(torch.nn.functional.linear(self.norm(gqa), self.embedding)),
+                    "logits": flat(self.lm_head(self.norm(gqa))),
                 }
                 past = end
 
@@ -233,6 +279,62 @@ def compare_partitions(full, chunked):
         torch.testing.assert_close(full[name], joined, atol=1e-5, rtol=1e-5)
 
 
+def run_graph(cli, model, chunks, mode, *, plan=False):
+    args = [cli, "run", model, "--logits", mode]
+    if plan:
+        args.append("--plan")
+    args.extend(",".join(map(str, chunk)) for chunk in chunks)
+    steps = [json.loads(line) for line in command(args).splitlines()]
+    assert len(steps) == len(chunks)
+    past = 0
+    for step, chunk in zip(steps, chunks):
+        past += len(chunk)
+        assert step["past"] == past and step["scratch_bytes"] > 0
+        assert step["dispatch_count"] > 0
+        rows = {"none": 0, "last": 1, "all": len(chunk)}[mode]
+        assert step["logit_rows"] == rows
+        if not rows:
+            assert not step["logits"]
+    return steps
+
+
+def test_graph_lowering(cli, model, reference, tokens, quantized=False):
+    chunks = [tokens[:2], tokens[2:3], tokens[3:]]
+    steps = run_graph(cli, model, chunks, "all")
+    pieces = []
+    for step, expected in zip(steps, reference.run(chunks)):
+        logits = torch.tensor(step["logits"])
+        torch.testing.assert_close(
+            logits, expected["logits"], atol=0.003, rtol=0.008
+        )
+        pieces.append(logits)
+    joined = torch.cat(pieces)
+
+    full = run_graph(cli, model, [tokens], "all", plan=True)[0]
+    torch.testing.assert_close(torch.tensor(full["logits"]), joined, atol=1e-5, rtol=1e-5)
+    lowered = full["dispatches"]
+    assert len(lowered) == full["dispatch_count"]
+    model_graph = json.loads(command([
+        cli, "graph", model, "--tokens", str(len(tokens)), "--logits", "all", "--json"
+    ]))
+    indices = [dispatch["op_index"] for dispatch in lowered]
+    assert indices == sorted(indices)
+    assert set(indices) == {
+        i for i, op in enumerate(model_graph["ops"]) if op["kind"] not in ("Reshape", "Slice")
+    }
+    assert any(dispatch["kernel"] == "copyHalfView" for dispatch in lowered)
+    linear = "linearW8A8" if quantized else "linearF16"
+    assert lowered[-1]["kernel"] == linear
+
+    last = run_graph(cli, model, [tokens], "last")[0]
+    torch.testing.assert_close(
+        torch.tensor(last["logits"]), joined[-reference.config.vocab_size:],
+        atol=1e-5, rtol=1e-5,
+    )
+    skipped = run_graph(cli, model, chunks, "none")[-1]
+    assert skipped["dispatch_count"] < steps[-1]["dispatch_count"]
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("converter", type=Path)
@@ -282,6 +384,12 @@ def main(args):
                                [tokens[:2], tokens[2:3], tokens[3:8], tokens[8:]])
             compare_partitions(full, chunked)
             run_case(args.reference_cli, reference, model, [[36], [1]])
+            test_graph_lowering(args.converter, model, reference, tokens)
+
+            w8_model = Path(directory) / "tiny-w8.llmi"
+            command([args.converter, "convert", checkpoint, w8_model])
+            reference.use_w8_weights(args.converter, w8_model)
+            test_graph_lowering(args.converter, w8_model, reference, tokens, quantized=True)
 
 
 if __name__ == "__main__":

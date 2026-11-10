@@ -114,11 +114,11 @@ y     = qᵀ S1
 
 `QuantizeActivation` 产生一对 SSA 值，分别表示 INT8 数据和 FP32 scale。`LinearW8A8` 显式消费这对值及量化权重，验证器检查逻辑 K、分组大小和 scale 形状。共享同一输入的 Q/K/V、DeltaNet 的 qkv/z/a/b、MLP 的 gate/up 各复用一次量化，输入不同的输出投影和 down 投影单独量化。Metal 后端可融合 norm 与量化，或在 GEMM tile 内量化。只有在融合后实际省去全局缓冲区访问时，执行成本才扣除相应流量。
 
-**MetalExecutionPlan** 将验证后的图绑定到 kernel 和缓冲区。降级阶段选择 kernel 变体、确定 dispatch 几何和依赖、规划临时 arena，并保留每条 dispatch 对应的 GraphIR op ID。prefill 以 `T` 桶复用计划，decode 使用 `T=1`，`P`、有效 `T` 和实际写入位置随调用绑定。计划缓存包含模型布局版本、设备能力和形状桶，逻辑成本按实际长度计算，padding 仅进入执行成本。
+**MetalExecutionPlan** 按 SSA 顺序遍历已验证的图，将节点转换为 kernel、参数、线程组尺寸和缓冲区绑定。每条 dispatch 保留来源 op ID。Reshape 和 Slice 先绑定到原存储，消费者需要连续布局时插入 `copyHalfView`。临时缓冲区按别名根值的最后一次使用复用。大矩阵按行分片，输出投影和 embedding 共享权重缓冲区。当前每步使用精确的 `T`、`P` 和容量构建计划。形状桶和计划缓存留给后续优化。
 
-**MetalExecutor** 将执行计划编码成 `MTLComputeCommandEncoder` 命令，管理 pipeline cache、buffer 绑定和同步。首版每个 prefill chunk 或 decode step 提交一个 command buffer，按依赖插入需要的 buffer 屏障或拆分 encoder。临时 arena 只在上一个使用者完成且依赖得到保证后复用。CPU 只在需要结果或处理失败时等待，无需逐算子同步。[Apple Metal compute encoder](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/)
+**MetalExecutor** 将计划编码成 `MTLComputeCommandEncoder` 命令。每条 dispatch 使用独立 encoder，Metal 跟踪共享缓冲区的依赖。每个 prefill chunk 或 decode step 提交一个 command buffer，CPU 在 chunk 末尾等待一次并读取 logits。W8A8 在 GPU 上对激活按 32 元素动态量化，执行分组 INT32 点积和 FP32 缩放求和。当前 FP16 和 W8A8 路径共用浮点 attention 与 DeltaNet 状态 kernel。GQA 的基线实现为每个 chunk 暂存 `T × query_heads × (P+T)` 个 FP16 分数，支持的 chunk 大小受单缓冲区上限约束。[Apple Metal compute encoder](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/)
 
-**SessionState** 独立持有可变状态，多个 session 可共享只读权重和执行计划。首版每个 session 只允许一个在途 step。进入 step 前校验容量，成功完成后才提交已处理长度 `P`。GPU 执行失败后使 session 失效并要求重置或用 token 历史重建，因为状态可能已经部分写入。
+**MetalSession** 持有模型权重、卷积历史、递归状态和 KV cache。进入 step 前校验 token 和容量，按本次输入构建 GraphIR 并核对状态布局。成功完成后才推进已处理长度 `P`。GPU 提交后出现错误会使会话失效，`reset()` 清零状态和位置。跨会话共享权重属于后续运行时扩展。
 
 主机接口可收敛为 `Engine::load(path)`、`Engine::createSession(capacity)`、`Session::prefill(tokenIds)` 和 `Session::decode(tokenId)`。后两者复用内部 `runStep(tokenIds, logitsMode)`。调用方消费当前 logits、选出下一个 token，再把它传入 `decode`。prefill 内部 chunk 可以跳过 logits 投影，但仍更新三类会话状态。
 

@@ -35,6 +35,16 @@ build/llmi graph build/qwen3.5-4b.llmi --tokens 1 --past 80 --json
 
 摘要列出各类算子的节点数、计算量和逻辑读写量。浮点计算量以 GFLOPs 表示，INT8 以等效 GFLOPs 表示，两者都按 `2 × MAC / 10⁹` 换算。逻辑读写量以 GB 表示，`1 GB = 10⁹` 字节。`--json` 提供 `op_counts`、SSA 值、算子属性和状态读写信息，并在总成本和逐算子成本中同时给出原始 MAC、字节数及换算值。
 
+## 执行 GraphIR
+
+macOS 上用 `llmi run` 执行 FP16 或 W8A8 模型。每个逗号分隔的 token ID 列表是一段 chunk。所有 chunk 共用同一会话和缓存。
+
+```sh
+build/llmi run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
+```
+
+每个 chunk 输出一行 JSON，包含累计已处理 token 数 `past`、词表 logits、dispatch 数和临时缓冲区字节数。`--logits last` 是默认值，`all` 返回每个输入 token 的 logits，`none` 用于仅推进状态。`--plan` 还输出每个 dispatch 的 `kernel` 和 `op_index`，后者对应相同输入形状下 `llmi graph --json` 的 `ops` 下标。
+
 ## FP16 Metal 参考图
 
 macOS 构建提供 `llmi-reference`。它从 `.llmi` 载入首个 DeltaNet 层和首个 GQA 层，以共享 embedding 和输出头连接两层。每个 token 参数代表一个 chunk，命令在同一个会话内依次执行，逐 chunk 输出包含中间结果和 cache 的 JSON 行。
