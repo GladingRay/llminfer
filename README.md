@@ -33,7 +33,7 @@ build/llmi graph build/qwen3.5-4b.llmi --tokens 16 --past 64 --capacity 4096
 build/llmi graph build/qwen3.5-4b.llmi --tokens 1 --past 80 --json
 ```
 
-摘要列出各类算子的节点数、计算量和逻辑读写字节。`--json` 通过 `op_counts` 提供各类算子的节点数，还会输出每个 SSA 值的形状和步幅、算子属性、状态读写区间与版本，以及逐算子成本。
+摘要列出各类算子的节点数、计算量和逻辑读写字节。浮点计算量以 GFLOPs 表示，INT8 以等效 GFLOPs 表示，两者都按 `2 × MAC / 10⁹` 换算。`--json` 提供 `op_counts`、SSA 值、算子属性和状态读写信息，并在总成本和逐算子成本中同时给出原始 MAC 和 GFLOPs。
 
 ## FP16 Metal 参考图
 

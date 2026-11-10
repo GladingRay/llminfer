@@ -3,6 +3,7 @@
 #include "llminfer/GraphIR/Cost.h"
 #include "llminfer/Models/Qwen35/Qwen35ModelBuilder.h"
 #include <charconv>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <type_traits>
@@ -14,9 +15,15 @@ using nlohmann::json;
 namespace {
 using OpCounts = std::map<std::string, size_t>;
 
+double macsToGigaOps(uint64_t macs) {
+  return 2.0 * static_cast<double>(macs) / 1e9;
+}
+
 json describeCost(const OpCost &cost) {
   return {{"int8_macs", cost.int8Macs},
           {"fp_macs", cost.fpMacs},
+          {"int8_equivalent_gflops", macsToGigaOps(cost.int8Macs)},
+          {"fp_gflops", macsToGigaOps(cost.fpMacs)},
           {"scalar_ops", cost.scalarOps},
           {"exp", cost.exp},
           {"rsqrt", cost.rsqrt},
@@ -196,9 +203,11 @@ Error llminfer::describeGraph(int argc, char **argv) {
             << "\nTokens: " << step.tokens << ", past: " << step.past
             << ", capacity: " << step.capacity
             << "\nOperations: " << graph->getOps().size()
-            << ", state slots: " << graph->getStates().size()
-            << "\nINT8 MACs: " << cost->total.int8Macs
-            << "\nFloating-point MACs: " << cost->total.fpMacs
+            << ", state slots: " << graph->getStates().size() << std::fixed
+            << std::setprecision(9) << "\nINT8 compute (equivalent GFLOPs): "
+            << macsToGigaOps(cost->total.int8Macs)
+            << "\nFloating-point compute (GFLOPs): "
+            << macsToGigaOps(cost->total.fpMacs)
             << "\nLogical read bytes: " << cost->total.logicalReadBytes
             << "\nLogical write bytes: " << cost->total.logicalWriteBytes
             << '\n';
