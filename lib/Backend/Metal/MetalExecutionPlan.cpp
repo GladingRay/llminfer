@@ -1,6 +1,7 @@
 #include "MetalExecutionPlan.h"
 #include "Kernels/GraphParams.h"
 #include "Kernels/ReferenceParams.h"
+#include "LinearW8Launch.h"
 #include "llminfer/ModelFormat/Quantization.h"
 #include "llminfer/Support/CheckedArithmetic.h"
 #include <algorithm>
@@ -300,14 +301,15 @@ Error Lowering::linear(const Operation &op) {
     weight.shard = i;
     if (quantized) {
       unsigned groups = shape(op.inputs[1])[1];
-      dispatch("linearW8A8",
+      auto launch = getLinearW8Launch(rows, cols);
+      dispatch(launch.kernel,
                {input,
                 dense(op.inputs[1]),
                 weight,
                 {BufferSpace::Scale, weight.index, i},
                 output},
-               LinearW8Params{width, first, groups}, cols, rows,
-               linearW8WorkgroupSize, 1);
+               LinearW8Params{width, first, groups, rows, cols}, launch.groupsX,
+               launch.groupsY, linearW8WorkgroupSize, 1);
     } else {
       unsigned inputWidth = shape(op.inputs[0])[1];
       dispatch("linearF16", {input, weight, output},

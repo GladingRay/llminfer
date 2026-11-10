@@ -301,7 +301,7 @@ def run_graph(cli, model, chunks, mode, *, plan=False):
 
 def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False):
     chunks = [tokens[:2], tokens[2:3], tokens[3:]]
-    steps = run_graph(run_cli, model, chunks, "all")
+    steps = run_graph(run_cli, model, chunks, "all", plan=quantized)
     pieces = []
     for step, expected in zip(steps, reference.run(chunks)):
         logits = torch.tensor(step["logits"])
@@ -324,10 +324,16 @@ def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False)
         i for i, op in enumerate(model_graph["ops"]) if op["kind"] not in ("Reshape", "Slice")
     }
     assert any(dispatch["kernel"] == "copyHalfView" for dispatch in lowered)
-    linear = "linearW8A8" if quantized else "linearF16"
+    linear = "linearW8A8Gemm" if quantized else "linearF16"
     assert lowered[-1]["kernel"] == linear
+    if quantized:
+        assert [step["dispatches"][-1]["kernel"] for step in steps] == [
+            "linearW8A8Gemm", "linearW8A8Gemv", "linearW8A8Gemm"
+        ]
 
-    last = run_graph(run_cli, model, [tokens], "last")[0]
+    last = run_graph(run_cli, model, [tokens], "last", plan=quantized)[0]
+    if quantized:
+        assert last["dispatches"][-1]["kernel"] == "linearW8A8Gemv"
     torch.testing.assert_close(
         torch.tensor(last["logits"]), joined[-reference.config.vocab_size:],
         atol=1e-5, rtol=1e-5,

@@ -1,6 +1,6 @@
 #include "GemmBench.h"
 #include "Benchmark.h"
-#include "Kernels/GraphParams.h"
+#include "LinearW8Launch.h"
 #include "llminfer/ModelFormat/Quantization.h"
 #include <array>
 #include <iomanip>
@@ -103,7 +103,8 @@ Error llminfer::metal::benchmarkGemm(GemmShape shape, unsigned samples) {
   auto context = MetalContext::create();
   if (!context)
     return context.getError();
-  auto pipeline = context->getPipeline("linearW8A8");
+  auto grid = getLinearW8Launch(shape.m, shape.n);
+  auto pipeline = context->getPipeline(grid.kernel);
   if (!pipeline)
     return pipeline.getError();
   auto buffers = allocateBuffers(*context, shape, groups, paddedK);
@@ -123,13 +124,13 @@ Error llminfer::metal::benchmarkGemm(GemmShape shape, unsigned samples) {
   std::fill_n(static_cast<uint16_t *>(buffers->output.contents), outputElements,
               uint16_t{0x7e00});
 
-  LinearW8Params params{shape.n, 0, groups};
+  LinearW8Params params{shape.n, 0, groups, shape.m, shape.n};
   auto launch = [&]() {
-    return timeDispatch(*context, "linearW8A8",
+    return timeDispatch(*context, grid.kernel,
                         {buffers->activation, buffers->activationScales,
                          buffers->weight, buffers->weightScales,
                          buffers->output},
-                        params, MTLSizeMake(shape.n, shape.m, 1),
+                        params, MTLSizeMake(grid.groupsX, grid.groupsY, 1),
                         MTLSizeMake(linearW8WorkgroupSize, 1, 1));
   };
   auto warmup = launch();
@@ -144,7 +145,7 @@ Error llminfer::metal::benchmarkGemm(GemmShape shape, unsigned samples) {
   uint64_t macs = outputElements * shape.k;
   double gigaOps = 2.0 * macs / 1e9;
   std::cout << "GPU: " << (*pipeline).device.name.UTF8String << '\n'
-            << "Kernel: linearW8A8 (Group32, FP16 output)\n"
+            << "Kernel: " << grid.kernel << " (Group32, FP16 output)\n"
             << "M: " << shape.m << ", N: " << shape.n << ", K: " << shape.k
             << " (padded: " << paddedK << "), samples: " << samples << '\n'
             << "Logical MACs per dispatch: " << macs << " (1 MAC = 2 ops)\n"

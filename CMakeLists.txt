@@ -61,6 +61,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     "${METAL_KERNELS}/Reference.metal"
     "${METAL_KERNELS}/GraphParams.h"
     "${METAL_KERNELS}/Graph.metal"
+    "${METAL_KERNELS}/W8A8.metal"
     "${METAL_KERNELS}/Int8Dot.metal"
     "${METAL_KERNELS}/MicrobenchParams.h"
     "${METAL_KERNELS}/Microbench.metal")
@@ -68,6 +69,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   file(READ "${METAL_KERNELS}/Reference.metal" REFERENCE_MSL)
   file(READ "${METAL_KERNELS}/GraphParams.h" GRAPH_PARAMS)
   file(READ "${METAL_KERNELS}/Graph.metal" GRAPH_MSL)
+  file(READ "${METAL_KERNELS}/W8A8.metal" W8A8_MSL)
   file(READ "${METAL_KERNELS}/Int8Dot.metal" INT8_DOT_MSL)
   file(READ "${METAL_KERNELS}/MicrobenchParams.h" MICROBENCH_PARAMS)
   file(READ "${METAL_KERNELS}/Microbench.metal" MICROBENCH_MSL)
@@ -188,8 +190,10 @@ if(BUILD_TESTING)
     add_test(NAME metal_microbench
       COMMAND llmi-metal-bench --threads 65 --iterations 7 --samples 2)
     add_test(NAME metal_gemm_benchmark
-      COMMAND llmi-metal-bench gemm --m 3 --n 5 --k 1057 --samples 2)
-    set_tests_properties(metal_microbench metal_gemm_benchmark
+      COMMAND llmi-metal-bench gemm --m 5 --n 11 --k 1057 --samples 2)
+    add_test(NAME metal_gemv_benchmark
+      COMMAND llmi-metal-bench gemm --m 1 --n 19 --k 1057 --samples 2)
+    set_tests_properties(metal_microbench metal_gemm_benchmark metal_gemv_benchmark
       PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(text_decoder_test tests/TextDecoderTest.cpp tools/run/TextTokenizer.cpp)
     target_include_directories(text_decoder_test PRIVATE lib/ModelFormat tools/run)

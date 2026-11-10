@@ -13,10 +13,17 @@ struct QuantizeParams {
   unsigned rows, width, groups;
 };
 
-enum : unsigned { linearW8WorkgroupSize = 32 };
+enum : unsigned {
+  linearW8WorkgroupSize = 128,
+  linearW8GemvLanes = 16,
+  linearW8GemmLanes = 8,
+  linearW8GemvColumns = linearW8WorkgroupSize / linearW8GemvLanes,
+  linearW8GemmColumns = linearW8WorkgroupSize / linearW8GemmLanes,
+  linearW8GemmRows = 4,
+};
 
 struct LinearW8Params {
-  unsigned outputWidth, firstRow, groups;
+  unsigned outputWidth, firstRow, groups, rows, columns;
 };
 
 struct L2Params {

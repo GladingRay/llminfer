@@ -67,49 +67,6 @@ kernel void quantizeActivation(device const half *input [[buffer(0)]],
   }
 }
 
-kernel void linearW8A8(device const char *activation [[buffer(0)]],
-                       device const float *activationScales [[buffer(1)]],
-                       device const char *weight [[buffer(2)]],
-                       device const half *weightScales [[buffer(3)]],
-                       device half *output [[buffer(4)]],
-                       constant LinearW8Params &p [[buffer(5)]],
-                       uint2 row [[threadgroup_position_in_grid]],
-                       uint lane [[thread_index_in_threadgroup]],
-                       uint simdIndex [[simdgroup_index_in_threadgroup]],
-                       uint simdLane [[thread_index_in_simdgroup]],
-                       uint simdWidth [[threads_per_simdgroup]]) {
-  float acc = 0.0f;
-  for (uint g = lane; g < p.groups; g += linearW8WorkgroupSize) {
-    uint a = row.y * p.groups + g;
-    uint w = row.x * p.groups + g;
-    device const char4 *av =
-        reinterpret_cast<device const char4 *>(activation + 32 * a);
-    device const char4 *wv =
-        reinterpret_cast<device const char4 *>(weight + 32 * w);
-    int dotProduct = 0;
-    for (uint i = 0; i < 8; ++i)
-      dotProduct += dotI8x4(av[i], wv[i]);
-    acc += float(dotProduct) * activationScales[a] * float(weightScales[w]);
-  }
-  float subtotal = simd_sum(acc);
-  uint out = row.y * p.outputWidth + p.firstRow + row.x;
-  if (simdWidth == linearW8WorkgroupSize) {
-    if (lane == 0)
-      output[out] = half(subtotal);
-    return;
-  }
-  threadgroup float partials[linearW8WorkgroupSize];
-  if (simdLane == 0)
-    partials[simdIndex] = subtotal;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (lane == 0) {
-    float total = 0.0f;
-    for (uint i = 0; i < (linearW8WorkgroupSize + simdWidth - 1) / simdWidth; ++i)
-      total += partials[i];
-    output[out] = half(total);
-  }
-}
-
 kernel void siluF16(device const half *input [[buffer(0)]],
                     device half *output [[buffer(1)]],
                     constant ElementParams &p [[buffer(2)]],

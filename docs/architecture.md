@@ -76,7 +76,39 @@ partial[t,n,g] = sum_k_in_g(int32(qA[t,k]) * int32(qW[n,k]))
 y[t,n] = fp16(sum_g(fp32(partial[t,n,g]) * sA[t,g] * fp32(sW[n,g])))
 ```
 
-每组 INT32 点积的绝对值上界为 `32×127²=516,128`。各组 scale 不同，必须按组乘回 scale 后再做 FP32 求和。Metal 基线将 INT8 向量加载后拓宽为 INT32，做整数乘加和归约。分别实现 decode 的 GEMV 与 prefill 的分块 GEMM 变体。原生低精度指令的可用性和收益按目标设备实测，基线依赖通用整数运算。[Apple Metal 类型](https://developer.apple.com/documentation/metal/mtldatatype) · [Apple SIMD 执行宽度](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
+每组 INT32 点积的绝对值上界为 `32×127²=516,128`。各组 scale 不同，必须按组乘回 scale 后再做 FP32 求和。Metal 按当前投影的输出行数 `M` 分派，包括 prefill 中只产生最后一行 logits 的输出头。两条路径都使用 128 线程的线程组，每个 K 量化组用两个 16 字节向量加载，拓宽到 INT32 做乘加。
+
+- `M=1` 使用 `linearW8A8Gemv`。每 16 个 lane 计算一列，一个线程组覆盖 8 列。每个 lane 处理间隔 16 个量化组的 K 切片。
+- `M>1` 使用 `linearW8A8Gemm`。一个线程组覆盖 `4×16` 输出 tile，每 8 个 lane 计算一列的 4 行。同一个 lane 把权重向量和 scale 复用于 4 行，并把各行的 FP32 累加值保存在寄存器中。M、N 的边界按实际形状限制读写，K 尾组沿用 Group32 补零。
+
+两条路径使用 SIMD shuffle 归约同一列的 lane，由组内首 lane 写回。SIMD 宽度与逻辑 lane 组不对齐时，改用 threadgroup 内存归约。权重仍按原格式逐行存储，输出分片使用原有的列偏移。[Apple SIMD 执行宽度](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
+
+### W8A8 性能记录
+
+在 Apple M2 上与 `6c4e89a` 的单输出线程组实现对比。每个形状交替运行优化前后各三轮，每轮预热后采集 15 次 GPU 时间，表中取三轮中位 GOPS 的中位数。GOPS 按 `2 × M × N × K / GPU 秒数 / 10⁹` 计算，输入是预先构造的 Group32 INT8 数据。
+
+| 路径 | M × N × K | 优化前 GOPS | 优化后 GOPS | 变化 |
+| --- | --- | ---: | ---: | ---: |
+| GEMV | 1 × 1024 × 2560 | 36.07 | 42.77 | +18.6% |
+| GEMV | 1 × 9216 × 2560 | 53.00 | 46.08 | −13.1% |
+| GEMV | 1 × 52428 × 2560 | 121.52 | 145.99 | +20.1% |
+| GEMV | 1 × 2560 × 9216 | 46.04 | 46.31 | +0.6% |
+| GEMM | 2 × 9216 × 2560 | 121.48 | 140.84 | +15.9% |
+| GEMM | 8 × 9216 × 2560 | 122.19 | 152.75 | +25.0% |
+| GEMM | 32 × 9216 × 2560 | 122.35 | 154.12 | +26.0% |
+| GEMM | 128 × 9216 × 2560 | 119.68 | 151.85 | +26.9% |
+
+短 dispatch 的波动较大。同一组配置的试测中，`1 × 9216 × 2560` 从 38.50 到 46.08 GOPS，`2 × 9216 × 2560` 从 84.32 到 83.01 GOPS。宽 GEMV 和 `M=8–128` GEMM 的提升在两次测量中一致。
+
+用同一份 Qwen3.5-4B W8A8 权重运行 `llmi-benchmark`，交替测量优化前后各三轮。32 token prefill 的中位吞吐由 16.65 增至 19.72 tok/s（+18.4%），随后 8 步 decode 由 8.34 增至 8.97 tok/s（+7.6%）。这组结果包含图构建、降级、Metal 执行和 logits 读回。
+
+小模型通过 Transformers 对拍，另用 CPU 点积校验了 M、N、K 尾块。FP32 归约顺序改变后，真实模型两步对拍的 logits 最大绝对差为 0.170，RMSE 不超过 0.036，两步的最高分 token 均一致。
+
+```sh
+build/llmi-metal-bench gemm --m 128 --n 9216 --k 2560 --samples 15
+build/llmi-metal-bench gemm --m 1 --n 52428 --k 2560 --samples 15
+build/llmi-benchmark build/qwen3.5-4b.llmi --prefill-tokens 32 --decode-tokens 8
+```
 
 ### 模型算子与状态
 

@@ -88,7 +88,7 @@ build/llmi-benchmark build/qwen3.5-4b.llmi --prefill-tokens 128 --decode-tokens 
 
 ## Metal INT8 乘加微基准
 
-`llmi-metal-bench` 无需模型文件。它复用 `linearW8A8` 的有符号 INT8 点积，将结果累加到 INT32 位宽，并扫描 GPU 支持的多种线程组大小。
+`llmi-metal-bench` 无需模型文件。它复用 W8A8 投影的有符号 INT8 向量乘法，将结果累加到 INT32 位宽，并扫描 GPU 支持的多种线程组大小。
 
 ```sh
 cmake --build build --target llmi-metal-bench
@@ -98,9 +98,9 @@ build/llmi-metal-bench --threads 65536 --iterations 512 --samples 9
 
 每个配置先预热并用 CPU 对拍采样线程的结果，再用 Metal command buffer 的 GPU 时间计算最快和中位 GOPS。每线程每次迭代执行 32 MAC，按 `1 MAC = 2 ops` 计数。`Peak measured` 是本次扫描的最高采样值。基准在寄存器中重复点积，测量该乘加循环的吞吐。完整 W8A8 matmul 还要读取矩阵、应用 scale 并归约。
 
-### W8A8 GEMM
+### W8A8 GEMM 和 GEMV
 
-`gemm` 子命令运行推理使用的 `linearW8A8`。`M` 是激活行数，`N` 是输出列数，`K` 是点积长度。默认形状 `128 × 9216 × 2560` 对应 128 个 token 的 Qwen3.5 MLP 升维投影。
+`gemm` 子命令使用与推理相同的分派。`M` 是激活行数，`N` 是输出列数，`K` 是点积长度。`M=1` 运行 `linearW8A8Gemv`，`M>1` 运行 `linearW8A8Gemm`。默认形状 `128 × 9216 × 2560` 对应 128 个 token 的 Qwen3.5 MLP 升维投影。实现细节和优化前后的数据见 [W8A8 性能记录](docs/architecture.md#w8a8-性能记录)。
 
 ```sh
 build/llmi-metal-bench gemm
