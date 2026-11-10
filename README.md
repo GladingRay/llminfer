@@ -75,6 +75,17 @@ build/llmi-run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
 
 每个 chunk 输出一行 JSON，包含累计已处理 token 数 `past`、词表 logits、dispatch 数和临时缓冲区字节数。`--logits last` 是默认值，`all` 返回每个输入 token 的 logits，`none` 用于仅推进状态。`--plan` 还输出每个 dispatch 的 `kernel` 和 `op_index`，后者对应相同输入形状下 `llmi graph --json` 的 `ops` 下标。
 
+## 模型吞吐基准
+
+macOS 上用 `llmi-benchmark` 测量 FP16 或 W8A8 `.llmi` 模型的 prefill 和 decode 吞吐。默认使用 128 个 prefill token 和 32 个 decode token。
+
+```sh
+cmake --build build --target llmi-benchmark
+build/llmi-benchmark build/qwen3.5-4b.llmi --prefill-tokens 128 --decode-tokens 32
+```
+
+工具使用合成 token ID。预热并重置状态后，整段 prefill 执行一次，decode 在同一个会话中每次处理一个 token，复用 prefill 写入的缓存。每步计算并读回最后一个 token 的 logits。tok/s 按阶段的实际耗时计算，包含图构建、降级和 Metal 执行。模型加载、预热和重置在计时前完成。将某一阶段设为 `0` 可跳过该阶段，单独测 decode 时从空缓存开始。
+
 ## Metal INT8 乘加微基准
 
 `llmi-metal-bench` 无需模型文件。它复用 `linearW8A8` 的有符号 INT8 点积，将结果累加到 INT32 位宽，并扫描 GPU 支持的多种线程组大小。

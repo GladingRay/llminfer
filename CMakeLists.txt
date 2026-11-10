@@ -161,6 +161,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   target_link_libraries(llmi-run PRIVATE
     llminfer_metal nlohmann_json::nlohmann_json llminfer_tokenizers_cpp)
 
+  add_executable(llmi-benchmark tools/benchmark/Main.cpp)
+  target_link_libraries(llmi-benchmark PRIVATE llminfer_metal)
+
   add_executable(llmi-reference tools/reference/Main.cpp)
   target_link_libraries(llmi-reference PRIVATE
     llminfer_metal_reference nlohmann_json::nlohmann_json)
@@ -198,7 +201,8 @@ if(BUILD_TESTING)
     add_test(NAME metal_reference
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/MetalReferenceTest.py"
               "$<TARGET_FILE:llmi>" "$<TARGET_FILE:llmi-reference>"
-              --run-cli "$<TARGET_FILE:llmi-run>" --allow-skip)
+              --run-cli "$<TARGET_FILE:llmi-run>"
+              --benchmark-cli "$<TARGET_FILE:llmi-benchmark>" --allow-skip)
     set_tests_properties(metal_reference PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()

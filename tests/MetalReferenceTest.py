@@ -3,6 +3,7 @@ from functools import partial
 import importlib.metadata
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -402,11 +403,23 @@ def test_text_generation(args, checkpoint, model):
                     "--chat-template", override]) == "\n"
 
 
+def test_model_benchmark(cli, model, prefill, decode):
+    lines = command([cli, model, "--prefill-tokens", str(prefill),
+                     "--decode-tokens", str(decode)]).splitlines()
+    expected = [(phase, count) for phase, count in (("Prefill", prefill), ("Decode", decode))
+                if count]
+    assert len(lines) == len(expected)
+    for line, (phase, count) in zip(lines, expected):
+        match = re.fullmatch(rf"{phase}: {count} tokens in ([0-9.]+) s, ([0-9.]+) tok/s", line)
+        assert match and float(match[1]) > 0 and float(match[2]) > 0, line
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("converter", type=Path)
     parser.add_argument("reference_cli", type=Path)
     parser.add_argument("--run-cli", type=Path)
+    parser.add_argument("--benchmark-cli", type=Path)
     parser.add_argument("--allow-skip", action="store_true")
     parser.add_argument("--hf-model", type=Path)
     parser.add_argument("--fp16-model", type=Path)
@@ -463,6 +476,11 @@ def main(args):
             test_graph_lowering(
                 args.converter, args.run_cli, w8_model, reference, tokens, quantized=True
             )
+            if args.benchmark_cli:
+                test_model_benchmark(args.benchmark_cli, model, 3, 2)
+                test_model_benchmark(args.benchmark_cli, w8_model, 4, 3)
+                test_model_benchmark(args.benchmark_cli, w8_model, 2, 0)
+                test_model_benchmark(args.benchmark_cli, w8_model, 0, 1)
 
 
 if __name__ == "__main__":
