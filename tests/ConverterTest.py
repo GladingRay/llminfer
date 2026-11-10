@@ -141,12 +141,14 @@ def test_graph(w8_model, dense_model):
     counts = Counter(op["kind"] for op in ops)
     assert graph["op_counts"] == counts
     summary = run(*args).splitlines()
-    for label, field, raw_field in (
-        ("INT8 compute (equivalent GFLOPs)", "int8_equivalent_gflops", "int8_macs"),
-        ("Floating-point compute (GFLOPs)", "fp_gflops", "fp_macs"),
+    for label, field, raw_field, multiplier in (
+        ("INT8 compute (equivalent GFLOPs)", "int8_equivalent_gflops", "int8_macs", 2),
+        ("Floating-point compute (GFLOPs)", "fp_gflops", "fp_macs", 2),
+        ("Logical read (GB)", "logical_read_gb", "logical_read_bytes", 1),
+        ("Logical write (GB)", "logical_write_gb", "logical_write_bytes", 1),
     ):
         cost = graph["cost"]
-        assert math.isclose(cost[field], 2 * cost[raw_field] / 1e9)
+        assert math.isclose(cost[field], multiplier * cost[raw_field] / 1e9)
         assert f"{label}: {cost[field]:.9f}" in summary
     assert summary[summary.index("Operation counts:") + 1:] == [
         f"  {name}: {count}" for name, count in sorted(counts.items())
@@ -170,6 +172,8 @@ def test_graph(w8_model, dense_model):
     delta = next(op for op in ops if op["kind"] == "DeltaUpdate")
     assert kv["cost"]["logical_write_bytes"] == 96
     assert gqa["cost"]["logical_read_bytes"] == 256
+    assert math.isclose(kv["cost"]["logical_write_gb"], 96 / 1e9)
+    assert math.isclose(gqa["cost"]["logical_read_gb"], 256 / 1e9)
     assert gqa["cost"]["fp_macs"] == 384
     assert math.isclose(gqa["cost"]["fp_gflops"], 768 / 1e9)
     assert delta["cost"]["fp_macs"] == 288

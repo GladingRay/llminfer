@@ -19,6 +19,10 @@ double macsToGigaOps(uint64_t macs) {
   return 2.0 * static_cast<double>(macs) / 1e9;
 }
 
+double bytesToGigabytes(uint64_t bytes) {
+  return static_cast<double>(bytes) / 1e9;
+}
+
 json describeCost(const OpCost &cost) {
   return {{"int8_macs", cost.int8Macs},
           {"fp_macs", cost.fpMacs},
@@ -33,7 +37,9 @@ json describeCost(const OpCost &cost) {
           {"sin_cos_pairs", cost.sinCosPairs},
           {"round_even", cost.roundEven},
           {"logical_read_bytes", cost.logicalReadBytes},
-          {"logical_write_bytes", cost.logicalWriteBytes}};
+          {"logical_write_bytes", cost.logicalWriteBytes},
+          {"logical_read_gb", bytesToGigabytes(cost.logicalReadBytes)},
+          {"logical_write_gb", bytesToGigabytes(cost.logicalWriteBytes)}};
 }
 
 json describeAttrs(const Attributes &attrs) {
@@ -207,10 +213,10 @@ Error llminfer::describeGraph(int argc, char **argv) {
             << std::setprecision(9) << "\nINT8 compute (equivalent GFLOPs): "
             << macsToGigaOps(cost->total.int8Macs)
             << "\nFloating-point compute (GFLOPs): "
-            << macsToGigaOps(cost->total.fpMacs)
-            << "\nLogical read bytes: " << cost->total.logicalReadBytes
-            << "\nLogical write bytes: " << cost->total.logicalWriteBytes
-            << '\n';
+            << macsToGigaOps(cost->total.fpMacs) << "\nLogical read (GB): "
+            << bytesToGigabytes(cost->total.logicalReadBytes)
+            << "\nLogical write (GB): "
+            << bytesToGigabytes(cost->total.logicalWriteBytes) << '\n';
   if (!graph->getOutputs().empty()) {
     const auto &shape =
         graph->getValues()[graph->getOutputs().front().index].type.shape;
