@@ -36,7 +36,15 @@ struct PartialRopeParams {
   float theta;
 };
 
-enum : unsigned { gqaSoftmaxWorkgroupSize = 128 };
+enum : unsigned {
+  gqaSoftmaxWorkgroupSize = 128,
+  flashGqaSimdWidth = 32,
+  flashGqaQueryTile = 4,
+  flashGqaKeyTile = 16,
+  flashGqaVectorWidth = 4,
+  flashGqaMaxHeadDim = 256,
+  flashGqaThreads = flashGqaSimdWidth * flashGqaQueryTile,
+};
 
 struct GraphDeltaParams {
   unsigned tokens, keyHeads, keyDim, valueHeads, valueDim;

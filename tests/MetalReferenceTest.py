@@ -99,6 +99,17 @@ def quantized_linear(input, weight):
     return result.half().reshape(*input.shape[:-1], data.size(0))
 
 
+def dense_fp32_attention(module, query, key, value, attention_mask, scaling, **kwargs):
+    # Reference the fused path with dense attention and no intermediate FP16 rounding.
+    key = key.float().repeat_interleave(module.num_key_value_groups, dim=1)
+    value = value.float().repeat_interleave(module.num_key_value_groups, dim=1)
+    scores = (query.float() @ key.transpose(-2, -1)) * scaling
+    if attention_mask is not None:
+        scores += attention_mask.float()
+    output = scores.softmax(dim=-1) @ value
+    return output.to(query.dtype).transpose(1, 2).contiguous(), None
+
+
 class TransformersReference:
     def __init__(self, path):
         text = json.loads((path / "config.json").read_text())["text_config"]
@@ -167,7 +178,7 @@ class TransformersReference:
                         quantized_linear, weight=weights[f"layers.{index}.{name}.weight"]
                     )
 
-    def run(self, chunks):
+    def run(self, chunks, flash_steps=None):
         def flat(value):
             return value.reshape(-1).float().clone()
 
@@ -193,7 +204,7 @@ class TransformersReference:
         past = 0
         cache = DynamicCache(config=self.config)
         with torch.inference_mode():
-            for tokens in chunks:
+            for tokens, flash in zip(chunks, flash_steps or [False] * len(chunks), strict=True):
                 end = past + len(tokens)
                 positions = torch.arange(past, end)
                 hidden = self.embedding[torch.tensor(tokens)][None]
@@ -203,14 +214,18 @@ class TransformersReference:
                 visible = torch.arange(end)[None, :] <= positions[:, None]
                 mask = torch.zeros(visible.shape, dtype=torch.float16)
                 mask.masked_fill_(~visible, float("-inf"))
-                gqa, gqa_trace = block(
-                    self.gqa,
-                    delta,
-                    position_embeddings=self.rope(delta, positions[None, None]),
-                    position_ids=positions[None],
-                    attention_mask=mask[None, None],
-                    past_key_values=cache,
-                )
+                self.config._attn_implementation = "llmi_dense_fp32" if flash else "eager"
+                try:
+                    gqa, gqa_trace = block(
+                        self.gqa,
+                        delta,
+                        position_embeddings=self.rope(delta, positions[None, None]),
+                        position_ids=positions[None],
+                        attention_mask=mask[None, None],
+                        past_key_values=cache,
+                    )
+                finally:
+                    self.config._attn_implementation = "eager"
                 conv = cache.layers[self.delta_index].conv_states[0]
                 history = self.config.linear_conv_kernel_dim - 1
                 state = cache.layers[self.delta_index].recurrent_states[0]
@@ -299,11 +314,16 @@ def run_graph(cli, model, chunks, mode, *, plan=False):
     return steps
 
 
+def uses_flash_attention(step):
+    return any(d["kernel"] == "gqaFlashAttention" for d in step["dispatches"])
+
+
 def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False):
     chunks = [tokens[:2], tokens[2:3], tokens[3:]]
-    steps = run_graph(run_cli, model, chunks, "all", plan=quantized)
+    steps = run_graph(run_cli, model, chunks, "all", plan=True)
+    flash_steps = [uses_flash_attention(step) for step in steps]
     pieces = []
-    for step, expected in zip(steps, reference.run(chunks)):
+    for step, expected in zip(steps, reference.run(chunks, flash_steps)):
         logits = torch.tensor(step["logits"])
         torch.testing.assert_close(
             logits, expected["logits"], atol=0.003, rtol=0.008
@@ -312,8 +332,13 @@ def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False)
     joined = torch.cat(pieces)
 
     full = run_graph(run_cli, model, [tokens], "all", plan=True)[0]
-    torch.testing.assert_close(torch.tensor(full["logits"]), joined, atol=1e-5, rtol=1e-5)
     lowered = full["dispatches"]
+    full_logits = torch.tensor(full["logits"])
+    if uses_flash_attention(full):
+        # Check partition invariance at the same attention precision.
+        tiled = run_graph(run_cli, model, [tokens[:5], tokens[5:]], "all")
+        joined = torch.tensor([value for step in tiled for value in step["logits"]])
+    torch.testing.assert_close(full_logits, joined, atol=1e-5, rtol=1e-5)
     assert len(lowered) == full["dispatch_count"]
     model_graph = json.loads(command([
         cli, "graph", model, "--tokens", str(len(tokens)), "--logits", "all", "--json"
@@ -335,7 +360,7 @@ def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False)
     if quantized:
         assert last["dispatches"][-1]["kernel"] == "linearW8A8Gemv"
     torch.testing.assert_close(
-        torch.tensor(last["logits"]), joined[-reference.config.vocab_size:],
+        torch.tensor(last["logits"]), full_logits[-reference.config.vocab_size:],
         atol=1e-5, rtol=1e-5,
     )
     skipped = run_graph(run_cli, model, chunks, "none")[-1]
@@ -421,11 +446,17 @@ def test_model_benchmark(cli, model, prefill, decode):
 
 
 def test_long_attention(run_cli, model, reference):
-    # Exercise multiple softmax iterations per lane and different causal lengths.
-    chunks = [[i % reference.config.vocab_size for i in range(131)], [5], [9]]
+    # Exercise partial tiles, nonzero past, and the switch to decode.
+    tokens = [i % reference.config.vocab_size for i in range(131)]
+    chunks = [tokens[:17], tokens[17:], [5], [9]]
     steps = run_graph(run_cli, model, chunks, "last", plan=True)
-    for step, expected in zip(steps, reference.run(chunks)):
-        assert any(dispatch["kernel"] == "gqaSoftmax" for dispatch in step["dispatches"])
+    flash_steps = [uses_flash_attention(step) for step in steps]
+    for chunk, step, expected in zip(chunks, steps, reference.run(chunks, flash_steps)):
+        kernels = {d["kernel"] for d in step["dispatches"]}
+        fused = flash_steps[0] and len(chunk) > 1
+        assert ("gqaFlashAttention" in kernels) == fused
+        assert ("gqaSoftmax" in kernels) != fused
+        assert ("gqaScores" in kernels) != fused
         torch.testing.assert_close(torch.tensor(step["logits"]),
                                    expected["logits"][-reference.config.vocab_size:],
                                    atol=0.003, rtol=0.008)
@@ -514,7 +545,8 @@ if __name__ == "__main__":
     from transformers.cache_utils import DynamicCache
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import (
-        Qwen3_5DecoderLayer, Qwen3_5RMSNorm, Qwen3_5TextRotaryEmbedding,
+        ALL_ATTENTION_FUNCTIONS, Qwen3_5DecoderLayer, Qwen3_5RMSNorm, Qwen3_5TextRotaryEmbedding,
     )
 
+    ALL_ATTENTION_FUNCTIONS.register("llmi_dense_fp32", dense_fp32_attention)
     main(args)

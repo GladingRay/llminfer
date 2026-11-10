@@ -8,6 +8,7 @@ inline constexpr char metalKernelSource[] = R"LLMI_METAL(
 @REFERENCE_MSL@
 @INT8_DOT_MSL@
 @GRAPH_MSL@
+@FLASH_ATTENTION_MSL@
 @W8A8_MSL@
 @MICROBENCH_MSL@
 )LLMI_METAL";

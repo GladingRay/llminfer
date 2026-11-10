@@ -61,6 +61,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     "${METAL_KERNELS}/Reference.metal"
     "${METAL_KERNELS}/GraphParams.h"
     "${METAL_KERNELS}/Graph.metal"
+    "${METAL_KERNELS}/FlashAttention.metal"
     "${METAL_KERNELS}/W8A8.metal"
     "${METAL_KERNELS}/Int8Dot.metal"
     "${METAL_KERNELS}/MicrobenchParams.h"
@@ -69,6 +70,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   file(READ "${METAL_KERNELS}/Reference.metal" REFERENCE_MSL)
   file(READ "${METAL_KERNELS}/GraphParams.h" GRAPH_PARAMS)
   file(READ "${METAL_KERNELS}/Graph.metal" GRAPH_MSL)
+  file(READ "${METAL_KERNELS}/FlashAttention.metal" FLASH_ATTENTION_MSL)
   file(READ "${METAL_KERNELS}/W8A8.metal" W8A8_MSL)
   file(READ "${METAL_KERNELS}/Int8Dot.metal" INT8_DOT_MSL)
   file(READ "${METAL_KERNELS}/MicrobenchParams.h" MICROBENCH_PARAMS)
@@ -187,6 +189,15 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ConverterTest.py"
             "$<TARGET_FILE:llmi>")
   if(TARGET llmi-reference)
+    add_executable(flash_attention_test tests/FlashAttentionTest.mm)
+    target_compile_options(flash_attention_test PRIVATE
+      -fobjc-arc -fno-exceptions -fno-objc-exceptions)
+    target_include_directories(flash_attention_test PRIVATE include lib/Backend/Metal)
+    target_link_libraries(flash_attention_test PRIVATE
+      llminfer_metal_context llminfer_model_format
+      "${METAL_FRAMEWORK}" "${FOUNDATION_FRAMEWORK}")
+    add_test(NAME flash_attention COMMAND flash_attention_test)
+    set_tests_properties(flash_attention PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME metal_microbench
       COMMAND llmi-metal-bench --threads 65 --iterations 7 --samples 2)
     add_test(NAME metal_gemm_benchmark

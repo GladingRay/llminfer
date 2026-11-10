@@ -40,7 +40,8 @@ struct MetalExecutionPlan {
   static Result<MetalExecutionPlan> lower(const ir::Graph &graph,
                                           const ModelFile &model,
                                           const WeightLayout &weights,
-                                          uint64_t maxBufferLength);
+                                          uint64_t maxBufferLength,
+                                          bool flashAttentionSupported);
 };
 
 } // namespace llminfer::metal

@@ -1,3 +1,4 @@
+#include "Kernels/GraphParams.h"
 #include "MetalContext.h"
 #include "MetalExecutionPlan.h"
 #include "llminfer/Backend/Metal/MetalSession.h"
@@ -27,6 +28,7 @@ public:
   void reset();
 
   uint64_t maxBufferLength() const { return context.maxBufferLength(); }
+  Result<bool> supportsFlashAttention();
   const WeightLayout &getLayout() const { return layout; }
   bool matchesStates(const Graph &graph) const;
 
@@ -100,6 +102,14 @@ bool MetalExecutor::matchesStates(const Graph &graph) const {
                              lhs.type.element == rhs.type.element &&
                              lhs.type.shape == rhs.type.shape;
                     });
+}
+
+Result<bool> MetalExecutor::supportsFlashAttention() {
+  auto pipeline = context.getPipeline("gqaFlashAttention");
+  if (!pipeline)
+    return pipeline.getError();
+  return (*pipeline).threadExecutionWidth == flashGqaSimdWidth &&
+         (*pipeline).maxTotalThreadsPerThreadgroup >= flashGqaThreads;
 }
 
 void MetalExecutor::reset() {
@@ -250,8 +260,16 @@ MetalSession::step(const CacheLineAlignedVector<uint32_t> &ids, LogitsMode mode,
     auto &executor = impl->executor;
     if (!executor.matchesStates(*graph))
       return Error("Graph state layout changed within the Metal session");
+    bool flashAttentionSupported = false;
+    if (ids.size() > 1) {
+      auto supported = executor.supportsFlashAttention();
+      if (!supported)
+        return supported.getError();
+      flashAttentionSupported = *supported;
+    }
     auto plan = MetalExecutionPlan::lower(
-        *graph, impl->model, executor.getLayout(), executor.maxBufferLength());
+        *graph, impl->model, executor.getLayout(), executor.maxBufferLength(),
+        flashAttentionSupported);
     if (!plan)
       return plan.getError();
     uint64_t newPast = impl->past + ids.size();

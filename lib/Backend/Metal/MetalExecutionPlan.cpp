@@ -60,9 +60,11 @@ struct Lifetime {
 class Lowering {
 public:
   Lowering(const Graph &graph, const ModelFile &model,
-           const WeightLayout &weights, uint64_t maxBufferLength)
+           const WeightLayout &weights, uint64_t maxBufferLength,
+           bool flashAttentionSupported)
       : graph(graph), model(model), weights(weights),
-        maxBufferLength(maxBufferLength), step(graph.getStep()),
+        maxBufferLength(maxBufferLength),
+        flashAttentionSupported(flashAttentionSupported), step(graph.getStep()),
         bindings(graph.getValues().size()) {}
 
   Result<MetalExecutionPlan> run();
@@ -113,6 +115,7 @@ private:
   const ModelFile &model;
   const WeightLayout &weights;
   uint64_t maxBufferLength;
+  bool flashAttentionSupported;
   StepShape step;
   CacheLineAlignedVector<Lifetime> bindings;
   CacheLineAlignedVector<uint64_t> valueCounts;
@@ -338,13 +341,21 @@ Error Lowering::attention(const Operation &op) {
 
   const auto &query = shape(op.inputs[0]);
   unsigned tokens = step.tokens, queryHeads = query[1];
+  GqaParams params{tokens, queryHeads, heads, headDim, past};
+  if (flashAttentionSupported && tokens > 1 && headDim <= flashGqaMaxHeadDim &&
+      headDim % flashGqaVectorWidth == 0) {
+    dispatch("gqaFlashAttention",
+             {dense(op.inputs[0]), keys, values, dense(op.outputs[0])}, params,
+             (uint64_t(tokens) + flashGqaQueryTile - 1) / flashGqaQueryTile,
+             queryHeads, flashGqaThreads, 1);
+    return failure;
+  }
   uint64_t queryRows = uint64_t(tokens) * queryHeads;
   uint64_t scoreCount;
   if (!checkedMul(queryRows, step.past + step.tokens, scoreCount) ||
       scoreCount > UINT32_MAX)
     return Error("GQA score buffer exceeds the 32-bit index range");
   auto scores = allocate(scoreCount * 2, opIndex);
-  GqaParams params{tokens, queryHeads, heads, headDim, past};
   dispatch("gqaScores", {dense(op.inputs[0]), keys, scores}, params,
            scoreCount);
   dispatch("gqaSoftmax", {scores}, params, queryRows, 1,
@@ -519,7 +530,9 @@ Result<MetalExecutionPlan> Lowering::run() {
 
 Result<MetalExecutionPlan>
 MetalExecutionPlan::lower(const Graph &graph, const ModelFile &model,
-                          const WeightLayout &weights,
-                          uint64_t maxBufferLength) {
-  return Lowering(graph, model, weights, maxBufferLength).run();
+                          const WeightLayout &weights, uint64_t maxBufferLength,
+                          bool flashAttentionSupported) {
+  return Lowering(graph, model, weights, maxBufferLength,
+                  flashAttentionSupported)
+      .run();
 }

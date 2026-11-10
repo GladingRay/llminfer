@@ -134,9 +134,15 @@ y     = qᵀ S1
 
 卷积只需保存最近 3 个**卷积前**的 QKV 向量。Prefill 采用分块投影和逐 token 递归，可用单个 dispatch 按 head 和 V 维分 tile，并在 tile 内保持时间顺序。Decode 复用单步递归。
 
-整模 GQA 在 prefill 和 decode 中共用三个 dispatch。`gqaScores` 计算因果窗口内的 QK 分数，`gqaSoftmax` 由一个线程组协作归约一个 query/head 的最大值和归一化分母，把 FP16 概率写回分数缓冲区。`gqaValue` 每线程负责一个输出通道，以 FP32 累加概率与 V 的乘积，再写出 FP16。概率在所有 value 通道间复用。参考图保留原来的标量实现供对拍。
+单 token decode 使用三个 dispatch。`gqaScores` 计算因果窗口内的 QK 分数，`gqaSoftmax` 由一个线程组协作归约一个 query/head 的最大值和归一化分母，把 FP16 概率写回分数缓冲区。`gqaValue` 每线程负责一个输出通道，以 FP32 累加概率与 V 的乘积，再写出 FP16。参考图保留原来的标量实现供对拍。
 
 在 Apple M2 上用同一份 Qwen3.5-4B W8A8 权重比较 `37e45db` 和并行 GQA，使用 `llmi-benchmark --prefill-tokens 512 --decode-tokens 512`。Prefill 由 20.10 增至 20.34 tok/s。Decode 由 174.87 秒缩短到 53.44 秒，吞吐由 **2.93 增至 9.58 tok/s（3.27 倍）**。这些数字包含整模图构建、降级、Metal 执行和 logits 读回。
+
+#### FlashAttention-2 prefill
+
+多 token prefill 可使用 `gqaFlashAttention`。每个 128 线程的线程组负责一个 query head 的 4 个 query，4 个 SIMD group 分别累加一行输出。线程组协作加载 16 个 token 的 K/V tile，query 按已有前缀位置和本轮位置计算因果边界。每行以 FP32 更新在线最大值、归一化分母和未归一化输出，最后才归一化并写出 FP16。KV head 映射和缓存布局与 decode 共用。支持 32-lane SIMD group，以及 4 的倍数且不超过 256 的 head dim。其余形状沿用三个 dispatch。[FlashAttention-2 论文](https://arxiv.org/abs/2307.08691)
+
+融合路径省去全局 `[query tokens, query heads, past + query tokens]` 分数缓冲区。从空缓存 prefill 512 token、16 个 query head 时，每个 GQA 算子省去 8 MiB 分数存储需求。在 Apple M2 上用同一份 W8A8 模型运行 `llmi-benchmark --prefill-tokens 512 --decode-tokens 32`，单轮 prefill 从 20.44 到 20.81 tok/s，随后 decode 从 9.57 到 9.82 tok/s。融合路径保留 FP32 概率，decode 保留原先的 FP16 概率舍入，因此对拍分别使用 dense FP32 和 eager 参考。
 
 ### FP16 参考图
 
