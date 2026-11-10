@@ -1,4 +1,5 @@
 #include "../TokenChunk.h"
+#include "ChatTemplate.h"
 #include "TextTokenizer.h"
 #include "llminfer/Backend/Metal/MetalSession.h"
 #include "llminfer/Support/CheckedArithmetic.h"
@@ -18,7 +19,7 @@ void printUsage(std::ostream &out) {
       << "  llmi-run <model.llmi> <token[,token...]>... [--capacity N] "
          "[--logits none|last|all] [--plan]\n"
       << "  llmi-run <model.llmi> --tokenizer <tokenizer.json> --prompt <text> "
-         "[--max-new-tokens N] [--capacity N]\n"
+         "[--chat [--chat-template PATH]] [--max-new-tokens N] [--capacity N]\n"
       << "  llmi-run encode <tokenizer.json> <text>\n"
       << "  llmi-run decode <tokenizer.json> <token[,token...]>\n";
 }
@@ -60,7 +61,16 @@ Error tokenize(int argc, char **argv, bool encode) {
 Error generateText(const std::filesystem::path &modelPath,
                    const std::filesystem::path &tokenizerPath,
                    std::string_view prompt, uint64_t maxNewTokens,
-                   uint64_t capacity) {
+                   uint64_t capacity,
+                   const std::optional<std::filesystem::path> &chatTemplate) {
+  std::optional<ChatPrompt> chat;
+  if (chatTemplate) {
+    auto rendered = renderChatPrompt(tokenizerPath, *chatTemplate, prompt);
+    if (!rendered)
+      return rendered.getError();
+    chat = std::move(*rendered);
+    prompt = chat->text;
+  }
   auto tokenizer = TextTokenizer::open(tokenizerPath);
   if (!tokenizer)
     return tokenizer.getError();
@@ -87,6 +97,7 @@ Error generateText(const std::filesystem::path &modelPath,
     return Error("Tokenizer contains IDs outside the model vocabulary");
 
   auto eos = session->getEosTokenId();
+  auto chatEos = chat ? tokenizer->findTokenId(chat->eosToken) : std::nullopt;
   auto step = session->step(*input);
   TextDecoder decoder(*tokenizer);
   for (uint64_t i = 0; i < maxNewTokens; ++i) {
@@ -100,7 +111,7 @@ Error generateText(const std::filesystem::path &modelPath,
     }
     if (!best)
       return Error("No finite logits for the tokenizer vocabulary");
-    if (best == eos)
+    if (best == eos || best == chatEos)
       break;
     auto chunk = decoder.push(*best);
     if (!chunk)
@@ -128,12 +139,15 @@ Error run(int argc, char **argv) {
   std::optional<LogitsMode> mode;
   std::optional<std::string_view> prompt;
   const char *tokenizerPath = nullptr;
-  bool tracePlan = false;
+  const char *chatTemplatePath = nullptr;
+  bool tracePlan = false, chat = false;
   CacheLineAlignedVector<CacheLineAlignedVector<uint32_t>> chunks;
   for (int i = 2; i < argc; ++i) {
     std::string_view argument = argv[i];
     if (argument == "--plan") {
       tracePlan = true;
+    } else if (argument == "--chat") {
+      chat = true;
     } else if (argument == "--logits") {
       if (++i == argc)
         return Error("Expected --logits none|last|all");
@@ -156,13 +170,16 @@ Error run(int argc, char **argv) {
         capacity = *value;
       else
         maxNewTokens = *value;
-    } else if (argument == "--prompt" || argument == "--tokenizer") {
+    } else if (argument == "--prompt" || argument == "--tokenizer" ||
+               argument == "--chat-template") {
       if (++i == argc)
         return Error("Missing value for " + std::string(argument));
       if (argument == "--prompt")
         prompt = argv[i];
-      else
+      else if (argument == "--tokenizer")
         tokenizerPath = argv[i];
+      else
+        chatTemplatePath = argv[i];
     } else {
       auto ids = parseChunk(argument);
       if (!ids)
@@ -172,13 +189,18 @@ Error run(int argc, char **argv) {
       chunks.push_back(std::move(*ids));
     }
   }
-  if (prompt || tokenizerPath || maxNewTokens) {
+  if (chatTemplatePath && (!chat || !*chatTemplatePath))
+    return Error("--chat-template requires --chat and a nonempty path");
+  if (prompt || tokenizerPath || maxNewTokens || chat) {
     if (!prompt || !tokenizerPath)
       return Error("Text generation requires --prompt and --tokenizer");
     if (!chunks.empty() || mode || tracePlan)
       return Error("Use token chunks, --logits and --plan in token ID mode");
+    std::optional<std::filesystem::path> chatTemplate;
+    if (chat)
+      chatTemplate.emplace(chatTemplatePath ? chatTemplatePath : "");
     return generateText(argv[1], tokenizerPath, *prompt,
-                        maxNewTokens.value_or(16), capacity);
+                        maxNewTokens.value_or(16), capacity, chatTemplate);
   }
   if (chunks.empty())
     return Error("Expected at least one token chunk");

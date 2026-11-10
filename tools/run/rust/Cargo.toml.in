@@ -1,0 +1,8 @@
+@TOKENIZERS_CARGO_MANIFEST@
+[dependencies.minijinja]
+version = "=2.24.0"
+features = ["json", "adjacent_loop_items", "loop_controls"]
+
+[dependencies.minijinja-contrib]
+version = "=2.24.0"
+features = ["pycompat"]

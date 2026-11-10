@@ -5,6 +5,7 @@
 #include "llminfer/Support/Result.h"
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tokenizers_cpp.h>
@@ -17,6 +18,7 @@ public:
 
   Result<CacheLineAlignedVector<uint32_t>> encode(std::string_view text);
   Result<std::string> decode(const CacheLineAlignedVector<uint32_t> &ids);
+  std::optional<uint32_t> findTokenId(const std::string &token);
   const auto &getTokenIds() const { return tokenIds; }
 
 private:

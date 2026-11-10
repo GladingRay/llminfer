@@ -142,6 +142,13 @@ bool TextTokenizer::contains(uint32_t id) const {
   return std::binary_search(tokenIds.begin(), tokenIds.end(), id);
 }
 
+std::optional<uint32_t> TextTokenizer::findTokenId(const std::string &token) {
+  auto id = tokenizer->TokenToId(token);
+  if (id < 0 || !contains(static_cast<uint32_t>(id)))
+    return std::nullopt;
+  return static_cast<uint32_t>(id);
+}
+
 Result<CacheLineAlignedVector<uint32_t>>
 TextTokenizer::encode(std::string_view text) {
   if (!isValidUtf8(text))

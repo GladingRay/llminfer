@@ -41,7 +41,7 @@ flowchart LR
 1. 读取 `config.json` 和 `model.safetensors.index.json`。按索引定位分片，校验必需张量的名称、形状、dtype、偏移和长度。逐张量分块转换，以行块为单位控制峰值内存。
 2. 将 HF 名称映射为稳定的 `TensorId`，由转换器和建图器共享 schema。按 `layer_types` 生成预期权重清单。本地检查点没有单独的 `lm_head.weight`，文件中保留一份 `embed_tokens.weight`，供 embedding gather 和输出投影共同引用。对无法识别的文本权重或不受支持的模型变体报错。
 3. 所有线性投影（包括 `in_proj_a/b`）的权重采用逐输出行、沿输入维 K 每 32 个元素一组的对称量化。`scale` 使用 FP16 保存，量化时使用同一已舍入的 scale。卷积权重使用 FP16。Norm 权重、`A_log` 和 `dt_bias` 保留为 FP32。可用同一容器保存未量化的 FP16 矩阵作为对拍路径。
-4. 写临时文件，校验目录和 payload 后原子替换目标。记录源配置、量化版本、各 dtype 大小和跳过项。Tokenizer 和模板保留为 HF 原始旁车文件，由接入层读取。
+4. 写临时文件，校验目录和 payload 后原子替换目标。记录源配置、量化版本、各 dtype 大小和跳过项。Tokenizer 和模板保留为 HF 原始旁车文件。`llmi-run --chat` 在编码前渲染单轮消息和助手生成前缀，聊天结束符由 tokenizer 配置提供。
 
 ```text
 maxAbs = max(abs(w))                # FP32，组内权重

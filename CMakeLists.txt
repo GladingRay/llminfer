@@ -96,7 +96,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     PUBLIC llminfer_qwen35_builder
     PRIVATE llminfer_metal_context)
 
-  # Build the Hugging Face backend from the pinned tokenizers-cpp submodule.
+  # Build the pinned Hugging Face backend and chat renderer in one Rust archive.
   set(TOKENIZERS_CPP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tokenizers-cpp")
   set(TOKENIZERS_RUST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tokenizers-rust")
   set(TOKENIZERS_RUST_LIB "${TOKENIZERS_RUST_DIR}/release/libtokenizers_c.a")
@@ -105,10 +105,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   endif()
   find_program(LLMINFER_CARGO_EXECUTABLE cargo REQUIRED
     HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin")
-  configure_file("${TOKENIZERS_CPP_ROOT}/rust/Cargo.toml"
-                 "${TOKENIZERS_RUST_DIR}/Cargo.toml" COPYONLY)
+  set(TOKENIZERS_CARGO_TOML "${TOKENIZERS_CPP_ROOT}/rust/Cargo.toml")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${TOKENIZERS_CARGO_TOML}")
+  file(READ "${TOKENIZERS_CARGO_TOML}" TOKENIZERS_CARGO_MANIFEST)
+  configure_file(tools/run/rust/Cargo.toml.in "${TOKENIZERS_RUST_DIR}/Cargo.toml" @ONLY)
   configure_file("${TOKENIZERS_CPP_ROOT}/rust/src/lib.rs"
-                 "${TOKENIZERS_RUST_DIR}/src/lib.rs" COPYONLY)
+                 "${TOKENIZERS_RUST_DIR}/src/tokenizers.rs" COPYONLY)
+  configure_file(tools/run/rust/lib.rs "${TOKENIZERS_RUST_DIR}/src/lib.rs" COPYONLY)
+  configure_file(tools/run/rust/chat_template.rs
+                 "${TOKENIZERS_RUST_DIR}/src/chat_template.rs" COPYONLY)
   set(TOKENIZERS_RUST_ENV)
   if(CMAKE_OSX_SYSROOT)
     list(APPEND TOKENIZERS_RUST_ENV "SDKROOT=${CMAKE_OSX_SYSROOT}")
@@ -123,6 +129,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
       --manifest-path "${TOKENIZERS_RUST_DIR}/Cargo.toml"
       --target-dir "${TOKENIZERS_RUST_DIR}"
     DEPENDS "${TOKENIZERS_RUST_DIR}/Cargo.toml" "${TOKENIZERS_RUST_DIR}/src/lib.rs"
+            "${TOKENIZERS_RUST_DIR}/src/tokenizers.rs"
+            "${TOKENIZERS_RUST_DIR}/src/chat_template.rs"
     VERBATIM)
   add_custom_target(llminfer_tokenizers_rust DEPENDS "${TOKENIZERS_RUST_LIB}")
   add_library(llminfer_tokenizers_cpp STATIC
@@ -132,7 +140,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     "${TOKENIZERS_CPP_ROOT}/include")
   target_link_libraries(llminfer_tokenizers_cpp PRIVATE "${TOKENIZERS_RUST_LIB}")
 
-  add_executable(llmi-run tools/run/Main.cpp tools/run/TextTokenizer.cpp)
+  add_executable(llmi-run tools/run/Main.cpp tools/run/TextTokenizer.cpp
+    tools/run/ChatTemplate.cpp)
   target_include_directories(llmi-run PRIVATE lib/ModelFormat)
   target_link_libraries(llmi-run PRIVATE
     llminfer_metal nlohmann_json::nlohmann_json llminfer_tokenizers_cpp)

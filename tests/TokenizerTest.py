@@ -49,6 +49,16 @@ def main(cli, stream_test):
         assert decoded.returncode == 0, decoded.stderr
         assert decoded.stdout == "你好 🌍\n"
 
+        chat_args = [cli, Path(directory) / "missing.llmi", "--tokenizer", tokenizer,
+                     "--prompt", "你好", "--chat"]
+        missing_template = subprocess.run(chat_args, capture_output=True, text=True)
+        assert missing_template.returncode == 1 and "template not found" in missing_template.stderr
+        tokenizer.with_name("chat_template.jinja").write_text(
+            "{{ raise_exception('invalid template') }}", encoding="utf-8"
+        )
+        invalid_template = subprocess.run(chat_args, capture_output=True, text=True)
+        assert invalid_template.returncode == 1 and "invalid template" in invalid_template.stderr
+
         invalid_id = run("decode", "3")
         assert invalid_id.returncode == 1 and "outside" in invalid_id.stderr
 

@@ -365,6 +365,36 @@ def test_text_generation(args, checkpoint, model):
     config_path.write_text(original)
     assert command([args.run_cli, eos_model, *options]) == "\n"
 
+    template_path = model.with_name("chat_template.jinja")
+    tokenizer_config = model.with_name("tokenizer_config.json")
+    template = (
+        "{%- for message in messages -%}"
+        "{{ message.content | trim }} "
+        "{%- endfor %}"
+        "{% if add_generation_prompt and enable_thinking is false %} 🌍{% endif %}"
+    )
+    template_path.write_text(template, encoding="utf-8")
+    chat_prompt = " 你好 "
+    chat_options = ["--tokenizer", tokenizer_path, "--prompt", chat_prompt,
+                    "--max-new-tokens", "1", "--chat"]
+    chat_logits = run_graph(args.run_cli, model, [[1, 2]], "last")[0]["logits"]
+    chat_token = max(candidates, key=chat_logits.__getitem__)
+    expected = tokenizer.decode([chat_token]) + "\n"
+    assert command([args.run_cli, model, *chat_options]) == expected
+
+    tokenizer_config.write_text(json.dumps({"chat_template": template}), encoding="utf-8")
+    template_path.unlink()
+    assert command([args.run_cli, model, *chat_options]) == expected
+
+    tokenizer_config.write_text(json.dumps({
+        "chat_template": "{{ raise_exception('Wrong template') }}",
+        "eos_token": tokenizer.id_to_token(chat_token),
+    }), encoding="utf-8")
+    override = model.with_name("override.jinja")
+    override.write_text(template, encoding="utf-8")
+    assert command([args.run_cli, model, *chat_options,
+                    "--chat-template", override]) == "\n"
+
 
 def parse_args():
     parser = argparse.ArgumentParser()

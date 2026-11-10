@@ -4,7 +4,7 @@
 
 ## 构建与测试
 
-需要 C++17 编译器、CMake 3.24 或更新版本以及 zlib。CMake 优先查找已安装的 nlohmann/json，否则会下载固定版本。macOS 上构建 `llmi-run` 还需要 Rust 和 Cargo，用于编译 `tokenizers-cpp` 的 Hugging Face 后端。运行测试需要 Python 3。
+需要 C++17 编译器、CMake 3.24 或更新版本以及 zlib。CMake 优先查找已安装的 nlohmann/json，否则会下载固定版本。macOS 上构建 `llmi-run` 还需要 Rust 和 Cargo，用于编译 `tokenizers-cpp` 的 Hugging Face 后端和 MiniJinja 模板渲染器。运行测试需要 Python 3。
 
 ```sh
 git submodule update --init -- third_party/tokenizers-cpp
@@ -47,6 +47,16 @@ build/llmi-run build/qwen3.5-4b.llmi \
 ```
 
 工具每步选择可解码 token 中 logits 最高的一个，并立即刷新该步可解码的续写文本。跨多个 token 的 UTF-8 字符会等字节齐全后一起输出，结束时仍残缺的字符用 `�` 表示。遇到模型配置的 EOS 或达到长度上限时停止。`--max-new-tokens` 默认为 16。
+
+加 `--chat` 可把 `--prompt` 作为一条用户消息，按模型的聊天模板渲染并追加助手生成前缀。工具优先读取 `tokenizer.json` 同目录的 `chat_template.jinja`，其次读取 `tokenizer_config.json` 中的 `chat_template` 字符串。可用 `--chat-template PATH` 指定模板文件。
+
+```sh
+build/llmi-run build/qwen3.5-4b.llmi \
+  --tokenizer /path/to/qwen3.5-4b/tokenizer.json \
+  --chat --prompt '中国的首都是哪里？' --max-new-tokens 32
+```
+
+聊天模式是单轮问答。Qwen3.5 模板收到 `enable_thinking=false`，回答仍按 token 流式输出，遇到 tokenizer 配置的聊天结束 token 时停止。
 
 `encode` 和 `decode` 可以单独使用，只需 `tokenizer.json`。
 
