@@ -194,6 +194,12 @@ MetalSession::~MetalSession() = default;
 MetalSession::MetalSession(MetalSession &&) noexcept = default;
 MetalSession &MetalSession::operator=(MetalSession &&) noexcept = default;
 
+uint64_t MetalSession::getVocabularySize() const { return impl->vocabulary; }
+
+std::optional<uint32_t> MetalSession::getEosTokenId() const {
+  return impl->model.getEosTokenId();
+}
+
 bool MetalSession::hasDevice() {
   @autoreleasepool {
     return MTLCreateSystemDefaultDevice() != nil;

@@ -4,6 +4,7 @@
 #include "llminfer/Models/Qwen35/Qwen35ModelBuilder.h"
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 namespace llminfer {
 
@@ -30,6 +31,9 @@ public:
   ~MetalSession();
   MetalSession(MetalSession &&) noexcept;
   MetalSession &operator=(MetalSession &&) noexcept;
+
+  uint64_t getVocabularySize() const;
+  std::optional<uint32_t> getEosTokenId() const;
 
   /// Calls on the same session must be serialized.
   Result<MetalStepResult> step(const CacheLineAlignedVector<uint32_t> &tokenIds,

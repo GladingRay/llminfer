@@ -279,10 +279,18 @@ Result<ModelSchema> llminfer::getModelSchema(std::string_view manifest) {
                    [](const json &name) { return name.is_string(); }))
     return Error("Invalid skipped_tensors array");
 
-  auto config = getQwen35TextConfig(getField(*root, "source_config"));
+  const auto &source = getField(*root, "source_config");
+  auto config = getQwen35TextConfig(source);
   if (!config)
     return config.getError();
-  return ModelSchema{precision, getTextTensors(*config, precision)};
+  std::optional<uint32_t> eosTokenId;
+  const auto &eos = getField(getField(source, "text_config"), "eos_token_id");
+  if (eos.is_number_unsigned()) {
+    auto id = eos.get<uint64_t>();
+    if (id <= UINT32_MAX && id < config->vocabulary)
+      eosTokenId = static_cast<uint32_t>(id);
+  }
+  return ModelSchema{precision, getTextTensors(*config, precision), eosTokenId};
 }
 
 std::string llminfer::makeManifest(

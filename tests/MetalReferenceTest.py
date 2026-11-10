@@ -335,6 +335,37 @@ def test_graph_lowering(cli, run_cli, model, reference, tokens, quantized=False)
     assert skipped["dispatch_count"] < steps[-1]["dispatch_count"]
 
 
+def test_text_generation(args, checkpoint, model):
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    tokenizer_path = model.with_name("tokenizer.json")
+    vocab = {"[UNK]": 0, "你好": 1, "🌍": 2, "继续": 4, "完成": 7}
+    tokenizer = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer.save(str(tokenizer_path))
+    candidates = sorted(vocab.values())
+    chunks = [[1, 2]]
+    generated = []
+    for _ in range(3):
+        logits = run_graph(args.run_cli, model, chunks, "last")[-1]["logits"]
+        token = max(candidates, key=logits.__getitem__)
+        chunks.append([token])
+        generated.append(token)
+
+    options = ["--tokenizer", tokenizer_path, "--prompt", "你好 🌍", "--max-new-tokens", "3"]
+    assert command([args.run_cli, model, *options]) == tokenizer.decode(generated) + "\n"
+
+    config_path = checkpoint / "config.json"
+    original = config_path.read_text()
+    config = json.loads(original)
+    config["text_config"]["eos_token_id"] = generated[0]
+    config_path.write_text(json.dumps(config))
+    eos_model = model.with_name("tiny-eos.llmi")
+    command([args.converter, "convert", checkpoint, eos_model, "--precision", "f16"])
+    config_path.write_text(original)
+    assert command([args.run_cli, eos_model, *options]) == "\n"
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("converter", type=Path)
@@ -388,6 +419,7 @@ def main(args):
             compare_partitions(full, chunked)
             run_case(args.reference_cli, reference, model, [[36], [1]])
             test_graph_lowering(args.converter, args.run_cli, model, reference, tokens)
+            test_text_generation(args, checkpoint, model)
 
             w8_model = Path(directory) / "tiny-w8.llmi"
             command([args.converter, "convert", checkpoint, w8_model])

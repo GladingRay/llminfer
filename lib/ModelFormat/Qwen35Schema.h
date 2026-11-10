@@ -28,6 +28,7 @@ getQwen35TextConfig(const nlohmann::json &sourceConfig);
 struct ModelSchema {
   Precision precision;
   CacheLineAlignedVector<TensorSpec> tensors;
+  std::optional<uint32_t> eosTokenId;
 };
 
 const nlohmann::json &getField(const nlohmann::json &object,

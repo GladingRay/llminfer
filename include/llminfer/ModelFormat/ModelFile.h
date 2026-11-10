@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -61,6 +62,7 @@ public:
   const CacheLineAlignedVector<TensorRecord> &getTensors() const;
   const TensorRecord *getTensor(std::string_view id) const;
   Precision getPrecision() const;
+  std::optional<uint32_t> getEosTokenId() const;
   const std::string &getManifest() const;
   uint64_t getFileSize() const;
   uint32_t getChecksum() const;

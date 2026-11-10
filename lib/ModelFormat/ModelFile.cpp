@@ -242,6 +242,7 @@ struct ModelFile::Impl {
     if (!schema)
       return schema.getError();
     precision = schema->precision;
+    eosTokenId = schema->eosTokenId;
     auto plan = planFile(manifestSize, schema->tensors);
     if (!plan)
       return plan.getError();
@@ -271,6 +272,7 @@ struct ModelFile::Impl {
   uint64_t size;
   uint32_t checksum;
   Precision precision;
+  std::optional<uint32_t> eosTokenId;
   std::string manifest;
   CacheLineAlignedVector<TensorRecord> tensors;
 };
@@ -309,6 +311,9 @@ const TensorRecord *ModelFile::getTensor(std::string_view id) const {
 }
 
 Precision ModelFile::getPrecision() const { return impl->precision; }
+std::optional<uint32_t> ModelFile::getEosTokenId() const {
+  return impl->eosTokenId;
+}
 const std::string &ModelFile::getManifest() const { return impl->manifest; }
 uint64_t ModelFile::getFileSize() const { return impl->size; }
 uint32_t ModelFile::getChecksum() const { return impl->checksum; }

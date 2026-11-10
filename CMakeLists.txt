@@ -4,6 +4,7 @@ project(llminfer LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
 add_compile_options("$<$<COMPILE_LANG_AND_ID:CXX,AppleClang,Clang,GNU>:-fno-exceptions>")
 
 find_package(ZLIB REQUIRED)
@@ -94,8 +95,47 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   target_link_libraries(llminfer_metal
     PUBLIC llminfer_qwen35_builder
     PRIVATE llminfer_metal_context)
-  add_executable(llmi-run tools/run/Main.cpp)
-  target_link_libraries(llmi-run PRIVATE llminfer_metal nlohmann_json::nlohmann_json)
+
+  # Build the Hugging Face backend from the pinned tokenizers-cpp submodule.
+  set(TOKENIZERS_CPP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tokenizers-cpp")
+  set(TOKENIZERS_RUST_DIR "${CMAKE_CURRENT_BINARY_DIR}/tokenizers-rust")
+  set(TOKENIZERS_RUST_LIB "${TOKENIZERS_RUST_DIR}/release/libtokenizers_c.a")
+  if(NOT EXISTS "${TOKENIZERS_CPP_ROOT}/rust/Cargo.toml")
+    message(FATAL_ERROR "Run git submodule update --init -- third_party/tokenizers-cpp")
+  endif()
+  find_program(LLMINFER_CARGO_EXECUTABLE cargo REQUIRED
+    HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin")
+  configure_file("${TOKENIZERS_CPP_ROOT}/rust/Cargo.toml"
+                 "${TOKENIZERS_RUST_DIR}/Cargo.toml" COPYONLY)
+  configure_file("${TOKENIZERS_CPP_ROOT}/rust/src/lib.rs"
+                 "${TOKENIZERS_RUST_DIR}/src/lib.rs" COPYONLY)
+  set(TOKENIZERS_RUST_ENV)
+  if(CMAKE_OSX_SYSROOT)
+    list(APPEND TOKENIZERS_RUST_ENV "SDKROOT=${CMAKE_OSX_SYSROOT}")
+  endif()
+  if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    list(APPEND TOKENIZERS_RUST_ENV
+      "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+  endif()
+  add_custom_command(OUTPUT "${TOKENIZERS_RUST_LIB}"
+    COMMAND "${CMAKE_COMMAND}" -E env ${TOKENIZERS_RUST_ENV}
+      "${LLMINFER_CARGO_EXECUTABLE}" build --release
+      --manifest-path "${TOKENIZERS_RUST_DIR}/Cargo.toml"
+      --target-dir "${TOKENIZERS_RUST_DIR}"
+    DEPENDS "${TOKENIZERS_RUST_DIR}/Cargo.toml" "${TOKENIZERS_RUST_DIR}/src/lib.rs"
+    VERBATIM)
+  add_custom_target(llminfer_tokenizers_rust DEPENDS "${TOKENIZERS_RUST_LIB}")
+  add_library(llminfer_tokenizers_cpp STATIC
+    "${TOKENIZERS_CPP_ROOT}/src/huggingface_tokenizer.cc")
+  add_dependencies(llminfer_tokenizers_cpp llminfer_tokenizers_rust)
+  target_include_directories(llminfer_tokenizers_cpp PUBLIC
+    "${TOKENIZERS_CPP_ROOT}/include")
+  target_link_libraries(llminfer_tokenizers_cpp PRIVATE "${TOKENIZERS_RUST_LIB}")
+
+  add_executable(llmi-run tools/run/Main.cpp tools/run/TextTokenizer.cpp)
+  target_include_directories(llmi-run PRIVATE lib/ModelFormat)
+  target_link_libraries(llmi-run PRIVATE
+    llminfer_metal nlohmann_json::nlohmann_json llminfer_tokenizers_cpp)
 
   add_executable(llmi-reference tools/reference/Main.cpp)
   target_link_libraries(llmi-reference PRIVATE
@@ -118,6 +158,9 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ConverterTest.py"
             "$<TARGET_FILE:llmi>")
   if(TARGET llmi-reference)
+    add_test(NAME tokenizer
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/TokenizerTest.py"
+              "$<TARGET_FILE:llmi-run>")
     add_test(NAME metal_reference
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/MetalReferenceTest.py"
               "$<TARGET_FILE:llmi>" "$<TARGET_FILE:llmi-reference>"

@@ -1,12 +1,13 @@
 # llminfer
 
-面向 Qwen3.5-4B 的 Metal 推理引擎项目。当前已实现文本权重转换、`.llmi` 加载和检查工具。
+面向 Qwen3.5-4B 的 Metal 推理引擎项目，提供模型转换、检查和文本生成工具。
 
 ## 构建与测试
 
-需要 C++17 编译器、CMake 3.24 或更新版本以及 zlib。CMake 优先查找已安装的 nlohmann/json，否则会下载固定版本。运行测试需要 Python 3。
+需要 C++17 编译器、CMake 3.24 或更新版本以及 zlib。CMake 优先查找已安装的 nlohmann/json，否则会下载固定版本。macOS 上构建 `llmi-run` 还需要 Rust 和 Cargo，用于编译 `tokenizers-cpp` 的 Hugging Face 后端。运行测试需要 Python 3。
 
 ```sh
+git submodule update --init -- third_party/tokenizers-cpp
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -35,9 +36,28 @@ build/llmi graph build/qwen3.5-4b.llmi --tokens 1 --past 80 --json
 
 摘要列出各类算子的节点数、计算量和逻辑读写量。浮点计算量以 GFLOPs 表示，INT8 以等效 GFLOPs 表示，两者都按 `2 × MAC / 10⁹` 换算。逻辑读写量以 GB 表示，`1 GB = 10⁹` 字节。`--json` 提供 `op_counts`、SSA 值、算子属性和状态读写信息，并在总成本和逐算子成本中同时给出原始 MAC、字节数及换算值。
 
+## 命令行文本生成
+
+macOS 上可用 `llmi-run` 执行 FP16 或 W8A8 模型。`--tokenizer` 指向同一 Hugging Face 模型目录中的 `tokenizer.json`。`--prompt` 接收 UTF-8 原始提示词，直接编码后送入模型。
+
+```sh
+build/llmi-run build/qwen3.5-4b.llmi \
+  --tokenizer /path/to/qwen3.5-4b/tokenizer.json \
+  --prompt '中国的首都是' --max-new-tokens 16
+```
+
+工具每步选择可解码 token 中 logits 最高的一个，遇到模型配置的 EOS 或达到长度上限时停止。`--max-new-tokens` 默认为 16，标准输出只包含解码后的续写文本。
+
+`encode` 和 `decode` 可以单独使用，只需 `tokenizer.json`。
+
+```sh
+build/llmi-run encode /path/to/qwen3.5-4b/tokenizer.json '你好，Qwen！'
+build/llmi-run decode /path/to/qwen3.5-4b/tokenizer.json 109266,3709,48,16451,6115
+```
+
 ## 执行 GraphIR
 
-macOS 上用独立工具 `llmi-run` 执行 FP16 或 W8A8 模型。每个逗号分隔的 token ID 列表是一段 chunk。所有 chunk 共用同一会话和缓存。
+`llmi-run` 也接受逗号分隔的 token ID。每个列表是一段 chunk，所有 chunk 共用同一会话和缓存。
 
 ```sh
 build/llmi-run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
