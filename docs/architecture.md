@@ -2,7 +2,7 @@
 
 ## 1. 首版目标
 
-在 Apple Silicon 上以 batch 1 运行 Qwen3.5-4B 的纯文本自回归推理，覆盖文本主干从 token ID 到 logits 的全部算子。首版采用 **W8A8**。所有线性投影使用离线 INT8 权重和运行时动态量化的 INT8 输入，每组点积使用 INT32 累加，乘回 scale 后在 FP32 合并各组结果。投影输出和层间激活使用 FP16，卷积、注意力和 KV cache 保持浮点路径，归约与 DeltaNet 递归状态使用 FP32。引擎接口接收 token ID。`llmi-run` 在 C++ 主机层用 `tokenizers-cpp` 编码原始提示词，驱动同一个 Metal 会话逐 token 贪心生成，结束后统一解码续写。
+在 Apple Silicon 上以 batch 1 运行 Qwen3.5-4B 的纯文本自回归推理，覆盖文本主干从 token ID 到 logits 的全部算子。首版采用 **W8A8**。所有线性投影使用离线 INT8 权重和运行时动态量化的 INT8 输入，每组点积使用 INT32 累加，乘回 scale 后在 FP32 合并各组结果。投影输出和层间激活使用 FP16，卷积、注意力和 KV cache 保持浮点路径，归约与 DeltaNet 递归状态使用 FP32。引擎接口接收 token ID。`llmi-run` 在 C++ 主机层用 `tokenizers-cpp` 编码原始提示词，驱动同一个 Metal 会话逐 token 贪心生成。流式解码器把 ByteLevel token 还原为字节，保留未完成的 UTF-8 字符，及时输出已解码的文本。
 
 本地检查点还包含视觉塔及 MTP 权重。首版转换时将它们记录为已知的跳过项。若后续需要图像或视频输入，再补视觉预处理、patch embedding、视觉 attention/MLP、patch merger 及三轴位置输入。MTP 可独立作为推测解码扩展。首版上下文验收目标为 4096 token，运行时根据设备预算配置上限。
 

@@ -158,9 +158,13 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ConverterTest.py"
             "$<TARGET_FILE:llmi>")
   if(TARGET llmi-reference)
+    add_executable(text_decoder_test tests/TextDecoderTest.cpp tools/run/TextTokenizer.cpp)
+    target_include_directories(text_decoder_test PRIVATE lib/ModelFormat tools/run)
+    target_link_libraries(text_decoder_test PRIVATE
+      llminfer_model_format nlohmann_json::nlohmann_json llminfer_tokenizers_cpp)
     add_test(NAME tokenizer
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/TokenizerTest.py"
-              "$<TARGET_FILE:llmi-run>")
+              "$<TARGET_FILE:llmi-run>" "$<TARGET_FILE:text_decoder_test>")
     add_test(NAME metal_reference
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/MetalReferenceTest.py"
               "$<TARGET_FILE:llmi>" "$<TARGET_FILE:llmi-reference>"

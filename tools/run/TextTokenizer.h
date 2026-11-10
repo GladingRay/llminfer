@@ -20,12 +20,36 @@ public:
   const auto &getTokenIds() const { return tokenIds; }
 
 private:
+  friend class TextDecoder;
+
   TextTokenizer(std::unique_ptr<tokenizers::Tokenizer> tokenizer,
-                CacheLineAlignedVector<uint32_t> ids)
-      : tokenizer(std::move(tokenizer)), tokenIds(std::move(ids)) {}
+                CacheLineAlignedVector<uint32_t> ids, bool byteLevel)
+      : tokenizer(std::move(tokenizer)), tokenIds(std::move(ids)),
+        byteLevel(byteLevel) {}
+
+  bool contains(uint32_t id) const;
 
   std::unique_ptr<tokenizers::Tokenizer> tokenizer;
   CacheLineAlignedVector<uint32_t> tokenIds;
+  bool byteLevel;
+};
+
+class TextDecoder {
+public:
+  explicit TextDecoder(TextTokenizer &tokenizer) : tokenizer(tokenizer) {}
+
+  /// Returns only the newly available text, which may be empty.
+  Result<std::string> push(uint32_t id);
+  Result<std::string> finish();
+
+private:
+  std::string drainBytes(bool final);
+  Result<std::string> decodePrefix(bool final);
+
+  TextTokenizer &tokenizer;
+  std::string pendingBytes;
+  CacheLineAlignedVector<uint32_t> ids;
+  std::string emitted;
 };
 
 } // namespace llminfer

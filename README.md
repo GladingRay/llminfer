@@ -46,7 +46,7 @@ build/llmi-run build/qwen3.5-4b.llmi \
   --prompt '中国的首都是' --max-new-tokens 16
 ```
 
-工具每步选择可解码 token 中 logits 最高的一个，遇到模型配置的 EOS 或达到长度上限时停止。`--max-new-tokens` 默认为 16，标准输出只包含解码后的续写文本。
+工具每步选择可解码 token 中 logits 最高的一个，并立即刷新该步可解码的续写文本。跨多个 token 的 UTF-8 字符会等字节齐全后一起输出，结束时仍残缺的字符用 `�` 表示。遇到模型配置的 EOS 或达到长度上限时停止。`--max-new-tokens` 默认为 16。
 
 `encode` 和 `decode` 可以单独使用，只需 `tokenizer.json`。
 

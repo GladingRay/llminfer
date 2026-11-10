@@ -88,7 +88,7 @@ Error generateText(const std::filesystem::path &modelPath,
 
   auto eos = session->getEosTokenId();
   auto step = session->step(*input);
-  CacheLineAlignedVector<uint32_t> output;
+  TextDecoder decoder(*tokenizer);
   for (uint64_t i = 0; i < maxNewTokens; ++i) {
     if (!step)
       return step.getError();
@@ -102,12 +102,16 @@ Error generateText(const std::filesystem::path &modelPath,
       return Error("No finite logits for the tokenizer vocabulary");
     if (best == eos)
       break;
-    output.push_back(*best);
+    auto chunk = decoder.push(*best);
+    if (!chunk)
+      return chunk.getError();
+    if (!chunk->empty())
+      std::cout << *chunk << std::flush;
     if (i + 1 < maxNewTokens)
       step = session->step({*best});
   }
 
-  auto text = tokenizer->decode(output);
+  auto text = decoder.finish();
   if (!text)
     return text.getError();
   std::cout << *text << '\n';
