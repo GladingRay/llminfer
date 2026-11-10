@@ -33,7 +33,7 @@ build/llmi graph build/qwen3.5-4b.llmi --tokens 16 --past 64 --capacity 4096
 build/llmi graph build/qwen3.5-4b.llmi --tokens 1 --past 80 --json
 ```
 
-摘要列出计算量和逻辑读写字节。`--json` 还会输出每个 SSA 值的形状和步幅、算子属性、状态读写区间与版本，以及逐算子成本。
+摘要列出各类算子的节点数、计算量和逻辑读写字节。`--json` 通过 `op_counts` 提供各类算子的节点数，还会输出每个 SSA 值的形状和步幅、算子属性、状态读写区间与版本，以及逐算子成本。
 
 ## FP16 Metal 参考图
 

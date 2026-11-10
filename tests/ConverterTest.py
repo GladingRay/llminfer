@@ -1,3 +1,4 @@
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -131,13 +132,18 @@ def write_checkpoint(directory, *, invalid_weight=False):
 
 
 def test_graph(w8_model, dense_model):
-    graph = json.loads(run(
-        "graph", w8_model, "--tokens", "3", "--past", "2", "--capacity", "8", "--json"
-    ))
+    args = ("graph", w8_model, "--tokens", "3", "--past", "2", "--capacity", "8")
+    graph = json.loads(run(*args, "--json"))
     assert graph["step"] == {"tokens": 3, "past": 2, "capacity": 8}
     assert len(graph["states"]) == 4
     assert graph["values"][graph["outputs"][0]]["shape"] == [1, 5]
     ops = graph["ops"]
+    counts = Counter(op["kind"] for op in ops)
+    assert graph["op_counts"] == counts
+    summary = run(*args).splitlines()
+    assert summary[summary.index("Operation counts:") + 1:] == [
+        f"  {name}: {count}" for name, count in sorted(counts.items())
+    ]
     assert {op["layer"] for op in ops if "layer" in op} == {0, 1}
     embed = ops[0]
     head = ops[-1]
@@ -171,7 +177,8 @@ def test_graph(w8_model, dense_model):
     dense = json.loads(run("graph", dense_model, "--tokens", "3", "--logits", "all", "--json"))
     assert dense["values"][dense["outputs"][0]]["shape"] == [3, 5]
     assert dense["cost"]["int8_macs"] == 0 and dense["cost"]["fp_macs"] > 0
-    assert not any(op["kind"] == "QuantizeActivation" for op in dense["ops"])
+    assert dense["op_counts"] == Counter(op["kind"] for op in dense["ops"])
+    assert "QuantizeActivation" not in dense["op_counts"]
 
     no_logits = json.loads(run("graph", w8_model, "--logits", "none", "--json"))
     assert not no_logits["outputs"]

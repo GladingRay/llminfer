@@ -4,6 +4,7 @@
 #include "llminfer/Models/Qwen35/Qwen35ModelBuilder.h"
 #include <charconv>
 #include <iostream>
+#include <map>
 #include <type_traits>
 
 using namespace llminfer;
@@ -11,6 +12,8 @@ using namespace llminfer::ir;
 using nlohmann::json;
 
 namespace {
+using OpCounts = std::map<std::string, size_t>;
+
 json describeCost(const OpCost &cost) {
   return {{"int8_macs", cost.int8Macs},
           {"fp_macs", cost.fpMacs},
@@ -64,7 +67,7 @@ json describeIds(const Values &values) {
 }
 
 json describeGraphJson(const Graph &graph, Precision precision,
-                       const CostReport &cost) {
+                       const CostReport &cost, const OpCounts &opCounts) {
   auto step = graph.getStep();
   json result{{"precision", getPrecisionName(precision)},
               {"step",
@@ -72,6 +75,7 @@ json describeGraphJson(const Graph &graph, Precision precision,
                 {"past", step.past},
                 {"capacity", step.capacity}}},
               {"outputs", describeIds(graph.getOutputs())},
+              {"op_counts", opCounts},
               {"cost", describeCost(cost.total)}};
   auto values = json::array();
   for (const auto &value : graph.getValues()) {
@@ -176,8 +180,14 @@ Error llminfer::describeGraph(int argc, char **argv) {
   if (!cost)
     return cost.getError();
 
+  OpCounts opCounts;
+  for (const auto &op : graph->getOps())
+    ++opCounts[std::string(getName(op.kind))];
+
   if (printJson) {
-    std::cout << describeGraphJson(*graph, model->getPrecision(), *cost).dump(2)
+    std::cout << describeGraphJson(*graph, model->getPrecision(), *cost,
+                                   opCounts)
+                     .dump(2)
               << '\n';
     return {};
   }
@@ -197,5 +207,8 @@ Error llminfer::describeGraph(int argc, char **argv) {
         graph->getValues()[graph->getOutputs().front().index].type.shape;
     std::cout << "Logits: " << shape[0] << " x " << shape[1] << '\n';
   }
+  std::cout << "Operation counts:\n";
+  for (const auto &[name, count] : opCounts)
+    std::cout << "  " << name << ": " << count << '\n';
   return {};
 }
