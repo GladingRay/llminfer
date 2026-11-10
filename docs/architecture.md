@@ -132,7 +132,11 @@ S1    = S0 + k ⊗ delta
 y     = qᵀ S1
 ```
 
-卷积只需保存最近 3 个**卷积前**的 QKV 向量。首版 prefill 采用分块投影和逐 token 递归，可用单个 dispatch 按 head 和 V 维分 tile，并在 tile 内保持时间顺序。decode 复用单步递归。GQA prefill 和 decode 可先共享在线 softmax 实现，按 query/head 扫描有效的 K/V，避免分配 `T×T` 中间结果。优化阶段再引入 tiled prefill、长上下文分段归约和 chunked DeltaNet。
+卷积只需保存最近 3 个**卷积前**的 QKV 向量。Prefill 采用分块投影和逐 token 递归，可用单个 dispatch 按 head 和 V 维分 tile，并在 tile 内保持时间顺序。Decode 复用单步递归。
+
+整模 GQA 在 prefill 和 decode 中共用三个 dispatch。`gqaScores` 计算因果窗口内的 QK 分数，`gqaSoftmax` 由一个线程组协作归约一个 query/head 的最大值和归一化分母，把 FP16 概率写回分数缓冲区。`gqaValue` 每线程负责一个输出通道，以 FP32 累加概率与 V 的乘积，再写出 FP16。概率在所有 value 通道间复用。参考图保留原来的标量实现供对拍。
+
+在 Apple M2 上用同一份 Qwen3.5-4B W8A8 权重比较 `37e45db` 和并行 GQA，使用 `llmi-benchmark --prefill-tokens 512 --decode-tokens 512`。Prefill 由 20.10 增至 20.34 tok/s。Decode 由 174.87 秒缩短到 53.44 秒，吞吐由 **2.93 增至 9.58 tok/s（3.27 倍）**。这些数字包含整模图构建、降级、Metal 执行和 logits 读回。
 
 ### FP16 参考图
 

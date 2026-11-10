@@ -347,8 +347,10 @@ Error Lowering::attention(const Operation &op) {
   GqaParams params{tokens, queryHeads, heads, headDim, past};
   dispatch("gqaScores", {dense(op.inputs[0]), keys, scores}, params,
            scoreCount);
+  dispatch("gqaSoftmax", {scores}, params, queryRows, 1,
+           gqaSoftmaxWorkgroupSize, 1);
   dispatch("gqaValue", {scores, values, dense(op.outputs[0])}, params,
-           queryRows);
+           count(op.outputs[0]));
   return failure;
 }
 

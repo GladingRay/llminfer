@@ -36,6 +36,8 @@ struct PartialRopeParams {
   float theta;
 };
 
+enum : unsigned { gqaSoftmaxWorkgroupSize = 128 };
+
 struct GraphDeltaParams {
   unsigned tokens, keyHeads, keyDim, valueHeads, valueDim;
 };

@@ -160,10 +160,62 @@ kernel void graphDeltaUpdate(device const float *q [[buffer(0)]],
   }
 }
 
-kernel void gqaValue(device const half *scores [[buffer(0)]],
+kernel void gqaSoftmax(device half *scores [[buffer(0)]],
+                       constant GqaParams &p [[buffer(1)]],
+                       uint row [[threadgroup_position_in_grid]],
+                       uint lane [[thread_index_in_threadgroup]],
+                       uint simdIndex [[simdgroup_index_in_threadgroup]],
+                       uint simdLane [[thread_index_in_simdgroup]],
+                       uint simdWidth [[threads_per_simdgroup]]) {
+  uint count = p.past + row / p.queryHeads + 1;
+  device half *logits = scores + row * (p.past + p.tokens);
+  uint simdGroups = (gqaSoftmaxWorkgroupSize + simdWidth - 1) / simdWidth;
+  threadgroup float maxima[gqaSoftmaxWorkgroupSize];
+  threadgroup float sums[gqaSoftmaxWorkgroupSize];
+
+  float maximum = -INFINITY;
+  for (uint i = lane; i < count; i += gqaSoftmaxWorkgroupSize)
+    maximum = max(maximum, float(logits[i]));
+  maximum = simd_max(maximum);
+  if (simdLane == 0)
+    maxima[simdIndex] = maximum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float maxLogit = maxima[0];
+  for (uint i = 1; i < simdGroups; ++i)
+    maxLogit = max(maxLogit, maxima[i]);
+
+  float sum = 0.0f;
+  for (uint i = lane; i < count; i += gqaSoftmaxWorkgroupSize)
+    sum += exp(float(logits[i]) - maxLogit);
+  sum = simd_sum(sum);
+  if (simdLane == 0)
+    sums[simdIndex] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float normalizer = 0.0f;
+  for (uint i = 0; i < simdGroups; ++i)
+    normalizer += sums[i];
+
+  // Keep the FP16 probability rounding used by the reference attention path.
+  for (uint i = lane; i < count; i += gqaSoftmaxWorkgroupSize)
+    logits[i] = half(exp(float(logits[i]) - maxLogit) / normalizer);
+}
+
+kernel void gqaValue(device const half *probabilities [[buffer(0)]],
                      device const half *values [[buffer(1)]],
                      device half *output [[buffer(2)]],
                      constant GqaParams &p [[buffer(3)]],
-                     uint row [[thread_position_in_grid]]) {
-  applyGqa(scores, values, nullptr, output, p, row);
+                     uint i [[thread_position_in_grid]]) {
+  uint row = i / p.headDim;
+  if (row >= p.tokens * p.queryHeads)
+    return;
+  uint dim = i % p.headDim;
+  uint count = p.past + row / p.queryHeads + 1;
+  uint kvHead = (row % p.queryHeads) / (p.queryHeads / p.kvHeads);
+  device const half *prob = probabilities + row * (p.past + p.tokens);
+  device const half *value = values + kvHead * p.headDim + dim;
+  uint stride = p.kvHeads * p.headDim;
+  float result = 0.0f;
+  for (uint k = 0; k < count; ++k)
+    result = fma(float(prob[k]), float(value[k * stride]), result);
+  output[i] = half(result);
 }

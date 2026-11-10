@@ -38,7 +38,7 @@ def make_tiny_checkpoint(path):
         "linear_key_head_dim": 7,
         "linear_value_head_dim": 5,
         "linear_conv_kernel_dim": 4,
-        "max_position_embeddings": 128,
+        "max_position_embeddings": 256,
         "rms_norm_eps": 1e-6,
         "rope_parameters": {
             "rope_type": "default",
@@ -420,6 +420,17 @@ def test_model_benchmark(cli, model, prefill, decode):
         assert match and float(match[1]) > 0 and float(match[2]) > 0, line
 
 
+def test_long_attention(run_cli, model, reference):
+    # Exercise multiple softmax iterations per lane and different causal lengths.
+    chunks = [[i % reference.config.vocab_size for i in range(131)], [5], [9]]
+    steps = run_graph(run_cli, model, chunks, "last", plan=True)
+    for step, expected in zip(steps, reference.run(chunks)):
+        assert any(dispatch["kernel"] == "gqaSoftmax" for dispatch in step["dispatches"])
+        torch.testing.assert_close(torch.tensor(step["logits"]),
+                                   expected["logits"][-reference.config.vocab_size:],
+                                   atol=0.003, rtol=0.008)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("converter", type=Path)
@@ -482,6 +493,7 @@ def main(args):
             test_graph_lowering(
                 args.converter, args.run_cli, w8_model, reference, tokens, quantized=True
             )
+            test_long_attention(args.run_cli, w8_model, reference)
             if args.benchmark_cli:
                 test_model_benchmark(args.benchmark_cli, model, 3, 2)
                 test_model_benchmark(args.benchmark_cli, w8_model, 4, 3)
