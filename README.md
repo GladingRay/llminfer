@@ -75,6 +75,18 @@ build/llmi-run build/qwen3.5-4b.llmi 1,15392 42 --capacity 128 --plan
 
 每个 chunk 输出一行 JSON，包含累计已处理 token 数 `past`、词表 logits、dispatch 数和临时缓冲区字节数。`--logits last` 是默认值，`all` 返回每个输入 token 的 logits，`none` 用于仅推进状态。`--plan` 还输出每个 dispatch 的 `kernel` 和 `op_index`，后者对应相同输入形状下 `llmi graph --json` 的 `ops` 下标。
 
+## Metal INT8 乘加微基准
+
+`llmi-metal-bench` 无需模型文件。它复用 `linearW8A8` 的有符号 INT8 点积，将结果累加到 INT32 位宽，并扫描 GPU 支持的多种线程组大小。
+
+```sh
+cmake --build build --target llmi-metal-bench
+build/llmi-metal-bench
+build/llmi-metal-bench --threads 65536 --iterations 512 --samples 9
+```
+
+每个配置先预热并用 CPU 对拍采样线程的结果，再用 Metal command buffer 的 GPU 时间计算最快和中位 GOPS。每线程每次迭代执行 32 MAC，按 `1 MAC = 2 ops` 计数。`Peak measured` 是本次扫描的最高采样值。基准在寄存器中重复点积，测量该乘加循环的吞吐。完整 W8A8 matmul 还要读取矩阵、应用 scale 并归约。
+
 ## FP16 Metal 参考图
 
 macOS 构建提供 `llmi-reference`。它从 `.llmi` 载入首个 DeltaNet 层和首个 GQA 层，以共享 embedding 和输出头连接两层。每个 token 参数代表一个 chunk，命令在同一个会话内依次执行，逐 chunk 输出包含中间结果和 cache 的 JSON 行。

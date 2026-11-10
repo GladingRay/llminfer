@@ -60,11 +60,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     "${METAL_KERNELS}/ReferenceParams.h"
     "${METAL_KERNELS}/Reference.metal"
     "${METAL_KERNELS}/GraphParams.h"
-    "${METAL_KERNELS}/Graph.metal")
+    "${METAL_KERNELS}/Graph.metal"
+    "${METAL_KERNELS}/Int8Dot.metal"
+    "${METAL_KERNELS}/MicrobenchParams.h"
+    "${METAL_KERNELS}/Microbench.metal")
   file(READ "${METAL_KERNELS}/ReferenceParams.h" REFERENCE_PARAMS)
   file(READ "${METAL_KERNELS}/Reference.metal" REFERENCE_MSL)
   file(READ "${METAL_KERNELS}/GraphParams.h" GRAPH_PARAMS)
   file(READ "${METAL_KERNELS}/Graph.metal" GRAPH_MSL)
+  file(READ "${METAL_KERNELS}/Int8Dot.metal" INT8_DOT_MSL)
+  file(READ "${METAL_KERNELS}/MicrobenchParams.h" MICROBENCH_PARAMS)
+  file(READ "${METAL_KERNELS}/Microbench.metal" MICROBENCH_MSL)
   configure_file("${METAL_KERNELS}/KernelSource.h.in"
                  "generated/KernelSource.h" @ONLY)
 
@@ -77,6 +83,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     include "${CMAKE_CURRENT_BINARY_DIR}/generated")
   target_link_libraries(llminfer_metal_context PRIVATE
     "${METAL_FRAMEWORK}" "${FOUNDATION_FRAMEWORK}")
+
+  add_executable(llmi-metal-bench tools/metal-bench/Main.mm)
+  target_compile_options(llmi-metal-bench PRIVATE
+    -fobjc-arc -fno-exceptions -fno-objc-exceptions)
+  target_include_directories(llmi-metal-bench PRIVATE include lib/Backend/Metal)
+  target_link_libraries(llmi-metal-bench PRIVATE
+    llminfer_metal_context "${METAL_FRAMEWORK}" "${FOUNDATION_FRAMEWORK}")
 
   add_library(llminfer_metal_reference lib/Models/Qwen35/MetalReferenceGraph.mm)
   target_compile_options(llminfer_metal_reference PRIVATE
@@ -167,6 +180,9 @@ if(BUILD_TESTING)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ConverterTest.py"
             "$<TARGET_FILE:llmi>")
   if(TARGET llmi-reference)
+    add_test(NAME metal_microbench
+      COMMAND llmi-metal-bench --threads 65 --iterations 7 --samples 2)
+    set_tests_properties(metal_microbench PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(text_decoder_test tests/TextDecoderTest.cpp tools/run/TextTokenizer.cpp)
     target_include_directories(text_decoder_test PRIVATE lib/ModelFormat tools/run)
     target_link_libraries(text_decoder_test PRIVATE

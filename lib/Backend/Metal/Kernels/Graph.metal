@@ -87,10 +87,8 @@ kernel void linearW8A8(device const char *activation [[buffer(0)]],
     device const char4 *wv =
         reinterpret_cast<device const char4 *>(weight + 32 * w);
     int dotProduct = 0;
-    for (uint i = 0; i < 8; ++i) {
-      int4 products = int4(av[i]) * int4(wv[i]);
-      dotProduct += products.x + products.y + products.z + products.w;
-    }
+    for (uint i = 0; i < 8; ++i)
+      dotProduct += dotI8x4(av[i], wv[i]);
     acc += float(dotProduct) * activationScales[a] * float(weightScales[w]);
   }
   float subtotal = simd_sum(acc);

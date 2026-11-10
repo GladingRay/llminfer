@@ -4,8 +4,11 @@
 inline constexpr char metalKernelSource[] = R"LLMI_METAL(
 @REFERENCE_PARAMS@
 @GRAPH_PARAMS@
+@MICROBENCH_PARAMS@
 @REFERENCE_MSL@
+@INT8_DOT_MSL@
 @GRAPH_MSL@
+@MICROBENCH_MSL@
 )LLMI_METAL";
 
 #endif

@@ -60,6 +60,8 @@ public:
 
   /// Sets submitted if the GPU may have mutated persistent state.
   Error finish(bool &submitted);
+  /// Returns the GPU time after a successful finish.
+  double getGpuSeconds() const;
 
   void encode(const char *name, const Buffer *buffers, size_t bufferCount,
               const void *params, size_t paramsSize, MTLSize groups,

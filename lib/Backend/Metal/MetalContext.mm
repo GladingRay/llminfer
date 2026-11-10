@@ -146,6 +146,10 @@ Error Command::finish(bool &submitted) {
   submitted = true;
   [commandBuffer waitUntilCompleted];
   if (commandBuffer.status != MTLCommandBufferStatusCompleted)
-    return metalError("Running Metal reference graph", commandBuffer.error);
+    return metalError("Running Metal command buffer", commandBuffer.error);
   return {};
+}
+
+double Command::getGpuSeconds() const {
+  return commandBuffer.GPUEndTime - commandBuffer.GPUStartTime;
 }
