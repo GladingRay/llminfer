@@ -51,6 +51,13 @@ def main(cli, stream_test):
 
         chat_args = [cli, Path(directory) / "missing.llmi", "--tokenizer", tokenizer,
                      "--prompt", "你好", "--chat"]
+        invalid_thinking = subprocess.run([*chat_args, "--thinking", "maybe"],
+                                          capture_output=True, text=True)
+        assert invalid_thinking.returncode == 1 and "--thinking on|off" in invalid_thinking.stderr
+        raw_thinking = subprocess.run([*chat_args[:-1], "--thinking", "off"],
+                                      capture_output=True, text=True)
+        assert raw_thinking.returncode == 1 and "requires --chat" in raw_thinking.stderr
+
         missing_template = subprocess.run(chat_args, capture_output=True, text=True)
         assert missing_template.returncode == 1 and "template not found" in missing_template.stderr
         tokenizer.with_name("chat_template.jinja").write_text(

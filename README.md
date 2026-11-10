@@ -56,7 +56,7 @@ build/llmi-run build/qwen3.5-4b.llmi \
   --chat --prompt '中国的首都是哪里？' --max-new-tokens 32
 ```
 
-聊天模式是单轮问答。Qwen3.5 模板收到 `enable_thinking=false`，回答仍按 token 流式输出，遇到 tokenizer 配置的聊天结束 token 时停止。
+聊天模式是单轮问答。用 `--thinking on` 启用 Qwen3.5 的思考模式，`--thinking off` 显式关闭，默认关闭。生成的思考和回答共享 `--max-new-tokens` 额度，按 token 流式输出，遇到 tokenizer 配置的聊天结束 token 时停止。
 
 `encode` 和 `decode` 可以单独使用，只需 `tokenizer.json`。
 

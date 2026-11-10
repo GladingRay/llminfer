@@ -14,14 +14,21 @@ using namespace llminfer;
 using nlohmann::json;
 
 namespace {
+struct ChatOptions {
+  std::filesystem::path templatePath;
+  bool enableThinking;
+};
+
 void printUsage(std::ostream &out) {
   out << "Usage:\n"
       << "  llmi-run <model.llmi> <token[,token...]>... [--capacity N] "
          "[--logits none|last|all] [--plan]\n"
       << "  llmi-run <model.llmi> --tokenizer <tokenizer.json> --prompt <text> "
-         "[--chat [--chat-template PATH]] [--max-new-tokens N] [--capacity N]\n"
+         "[--chat [--chat-template PATH] [--thinking on|off]] "
+         "[--max-new-tokens N] [--capacity N]\n"
       << "  llmi-run encode <tokenizer.json> <text>\n"
-      << "  llmi-run decode <tokenizer.json> <token[,token...]>\n";
+      << "  llmi-run decode <tokenizer.json> <token[,token...]>\n"
+      << "  --thinking defaults to off.\n";
 }
 
 Result<uint64_t> parsePositive(std::string_view text, std::string_view flag) {
@@ -62,10 +69,11 @@ Error generateText(const std::filesystem::path &modelPath,
                    const std::filesystem::path &tokenizerPath,
                    std::string_view prompt, uint64_t maxNewTokens,
                    uint64_t capacity,
-                   const std::optional<std::filesystem::path> &chatTemplate) {
+                   const std::optional<ChatOptions> &chatOptions) {
   std::optional<ChatPrompt> chat;
-  if (chatTemplate) {
-    auto rendered = renderChatPrompt(tokenizerPath, *chatTemplate, prompt);
+  if (chatOptions) {
+    auto rendered = renderChatPrompt(tokenizerPath, chatOptions->templatePath,
+                                     prompt, chatOptions->enableThinking);
     if (!rendered)
       return rendered.getError();
     chat = std::move(*rendered);
@@ -138,6 +146,7 @@ Error run(int argc, char **argv) {
   std::optional<uint64_t> maxNewTokens;
   std::optional<LogitsMode> mode;
   std::optional<std::string_view> prompt;
+  std::optional<bool> thinking;
   const char *tokenizerPath = nullptr;
   const char *chatTemplatePath = nullptr;
   bool tracePlan = false, chat = false;
@@ -148,6 +157,13 @@ Error run(int argc, char **argv) {
       tracePlan = true;
     } else if (argument == "--chat") {
       chat = true;
+    } else if (argument == "--thinking") {
+      if (++i == argc)
+        return Error("Expected --thinking on|off");
+      std::string_view value = argv[i];
+      if (value != "on" && value != "off")
+        return Error("Expected --thinking on|off");
+      thinking = value == "on";
     } else if (argument == "--logits") {
       if (++i == argc)
         return Error("Expected --logits none|last|all");
@@ -191,16 +207,19 @@ Error run(int argc, char **argv) {
   }
   if (chatTemplatePath && (!chat || !*chatTemplatePath))
     return Error("--chat-template requires --chat and a nonempty path");
+  if (thinking.has_value() && !chat)
+    return Error("--thinking requires --chat");
   if (prompt || tokenizerPath || maxNewTokens || chat) {
     if (!prompt || !tokenizerPath)
       return Error("Text generation requires --prompt and --tokenizer");
     if (!chunks.empty() || mode || tracePlan)
       return Error("Use token chunks, --logits and --plan in token ID mode");
-    std::optional<std::filesystem::path> chatTemplate;
+    std::optional<ChatOptions> chatOptions;
     if (chat)
-      chatTemplate.emplace(chatTemplatePath ? chatTemplatePath : "");
+      chatOptions = ChatOptions{chatTemplatePath ? chatTemplatePath : "",
+                                thinking.value_or(false)};
     return generateText(argv[1], tokenizerPath, *prompt,
-                        maxNewTokens.value_or(16), capacity, chatTemplate);
+                        maxNewTokens.value_or(16), capacity, chatOptions);
   }
   if (chunks.empty())
     return Error("Expected at least one token chunk");

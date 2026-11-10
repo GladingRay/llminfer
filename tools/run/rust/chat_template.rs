@@ -23,6 +23,7 @@ struct ChatInput {
     prompt: Input,
     bos_token: Input,
     eos_token: Input,
+    enable_thinking: u8,
 }
 
 fn render(input: &ChatInput) -> Result<String, String> {
@@ -45,7 +46,7 @@ fn render(input: &ChatInput) -> Result<String, String> {
             bos_token => input.bos_token.as_str()?,
             eos_token => input.eos_token.as_str()?,
             add_generation_prompt => true,
-            enable_thinking => false,
+            enable_thinking => input.enable_thinking != 0,
         },
     )
     .map_err(|err| format!("{err}"))

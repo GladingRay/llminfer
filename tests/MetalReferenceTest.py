@@ -381,6 +381,12 @@ def test_text_generation(args, checkpoint, model):
     chat_token = max(candidates, key=chat_logits.__getitem__)
     expected = tokenizer.decode([chat_token]) + "\n"
     assert command([args.run_cli, model, *chat_options]) == expected
+    assert command([args.run_cli, model, *chat_options, "--thinking", "off"]) == expected
+
+    thinking_logits = run_graph(args.run_cli, model, [[1]], "last")[0]["logits"]
+    thinking_token = max(candidates, key=thinking_logits.__getitem__)
+    assert command([args.run_cli, model, *chat_options, "--thinking", "on",
+                    "--capacity", "1"]) == tokenizer.decode([thinking_token]) + "\n"
 
     tokenizer_config.write_text(json.dumps({"chat_template": template}), encoding="utf-8")
     template_path.unlink()

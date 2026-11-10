@@ -17,6 +17,7 @@ struct ChatInput {
   Input prompt;
   Input bosToken;
   Input eosToken;
+  uint8_t enableThinking;
 };
 
 extern "C" {
@@ -40,7 +41,7 @@ Result<bool> checkFileExists(const std::filesystem::path &path) {
 Result<ChatPrompt>
 llminfer::renderChatPrompt(const std::filesystem::path &tokenizer,
                            const std::filesystem::path &overridePath,
-                           std::string_view prompt) {
+                           std::string_view prompt, bool enableThinking) {
   auto configPath = tokenizer.parent_path() / "tokenizer_config.json";
   auto hasConfig = checkFileExists(configPath);
   if (!hasConfig)
@@ -90,7 +91,8 @@ llminfer::renderChatPrompt(const std::filesystem::path &tokenizer,
   ChatInput input{{source.data(), source.size()},
                   {prompt.data(), prompt.size()},
                   {bosToken.data(), bosToken.size()},
-                  {eosToken.data(), eosToken.size()}};
+                  {eosToken.data(), eosToken.size()},
+                  static_cast<uint8_t>(enableThinking)};
   std::string output;
   if (llmi_render_chat_template(&input, &output, storeOutput) != 0)
     return Error(path.string() + ": " + output);

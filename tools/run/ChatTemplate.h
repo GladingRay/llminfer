@@ -14,7 +14,8 @@ struct ChatPrompt {
 
 Result<ChatPrompt> renderChatPrompt(const std::filesystem::path &tokenizer,
                                     const std::filesystem::path &overridePath,
-                                    std::string_view prompt);
+                                    std::string_view prompt,
+                                    bool enableThinking);
 
 } // namespace llminfer
 
