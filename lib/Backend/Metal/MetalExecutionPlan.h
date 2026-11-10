@@ -3,7 +3,8 @@
 
 #include "llminfer/GraphIR/Graph.h"
 #include "llminfer/ModelFormat/ModelFile.h"
-#include <array>
+#include <functional>
+#include <initializer_list>
 
 namespace llminfer::metal {
 
@@ -23,8 +24,8 @@ struct BufferRef {
 struct Dispatch {
   const char *kernel;
   size_t opIndex;
-  CacheLineAlignedVector<BufferRef> buffers;
-  std::array<uint8_t, 64> params;
+  std::initializer_list<BufferRef> buffers;
+  const void *params;
   size_t paramSize;
   unsigned groupsX, groupsY, threadsX, threadsY;
   const char *epilogue = nullptr;
@@ -32,18 +33,22 @@ struct Dispatch {
 };
 
 struct MetalExecutionPlan {
+  using PrepareScratch =
+      std::function<Error(const CacheLineAlignedVector<uint64_t> &)>;
+  // Dispatch buffers and parameters are borrowed for the duration of the call.
+  using EncodeDispatch = std::function<void(const Dispatch &)>;
+
   CacheLineAlignedVector<uint64_t> scratchBytes;
-  CacheLineAlignedVector<Dispatch> dispatches;
   BufferRef tokens;
   std::optional<BufferRef> invalidActivation;
   std::optional<BufferRef> logits;
   uint64_t logitRows = 0, logitElements = 0;
 
-  static Result<MetalExecutionPlan> lower(const ir::Graph &graph,
-                                          const ModelFile &model,
-                                          const WeightLayout &weights,
-                                          uint64_t maxBufferLength,
-                                          bool flashAttentionSupported);
+  static Result<MetalExecutionPlan>
+  lower(const ir::Graph &graph, const ModelFile &model,
+        const WeightLayout &weights, uint64_t maxBufferLength,
+        bool flashAttentionSupported, const PrepareScratch &prepare,
+        const EncodeDispatch &encode);
 };
 
 } // namespace llminfer::metal

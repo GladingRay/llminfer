@@ -21,15 +21,15 @@ public:
   explicit MetalExecutor(MetalContext context) : context(std::move(context)) {}
 
   Error initialize(const ModelFile &model, const Graph &graph);
-  Result<MetalStepResult> execute(const MetalExecutionPlan &plan,
+  Result<MetalStepResult> execute(const Graph &graph, const ModelFile &model,
                                   const CacheLineAlignedVector<uint32_t> &ids,
                                   uint64_t newPast, bool tracePlan,
+                                  bool flashAttentionSupported,
                                   bool &submitted);
   void reset();
 
   uint64_t maxBufferLength() const { return context.maxBufferLength(); }
   Result<bool> supportsFlashAttention();
-  const WeightLayout &getLayout() const { return layout; }
   bool matchesStates(const Graph &graph) const;
 
 private:
@@ -132,59 +132,68 @@ Buffer MetalExecutor::resolve(BufferRef ref) const {
 }
 
 Result<MetalStepResult>
-MetalExecutor::execute(const MetalExecutionPlan &plan,
+MetalExecutor::execute(const Graph &graph, const ModelFile &model,
                        const CacheLineAlignedVector<uint32_t> &ids,
-                       uint64_t newPast, bool tracePlan, bool &submitted) {
+                       uint64_t newPast, bool tracePlan,
+                       bool flashAttentionSupported, bool &submitted) {
   submitted = false;
-  scratch.resize(plan.scratchBytes.size(), nil);
-  uint64_t scratchBytes = 0;
-  for (size_t i = 0; i < scratch.size(); ++i) {
-    auto size = plan.scratchBytes[i];
-    if (scratch[i].length < size) {
-      scratch[i] = nil;
-      auto buffer = context.makeBuffer(size);
-      if (!buffer)
-        return buffer.getError();
-      scratch[i] = *buffer;
+  MetalStepResult result{newPast, 0, 0, 0, {}, {}};
+  std::optional<Command> command;
+  auto prepare = [&](const CacheLineAlignedVector<uint64_t> &sizes) -> Error {
+    scratch.resize(sizes.size(), nil);
+    for (size_t i = 0; i < scratch.size(); ++i) {
+      if (scratch[i].length < sizes[i]) {
+        scratch[i] = nil;
+        auto buffer = context.makeBuffer(sizes[i]);
+        if (!buffer)
+          return buffer.getError();
+        scratch[i] = *buffer;
+      }
+      result.scratchBytes += scratch[i].length;
     }
-    scratchBytes += scratch[i].length;
-  }
-  std::memcpy(resolve(plan.tokens).contents, ids.data(),
-              ids.size() * sizeof(uint32_t));
-  if (plan.invalidActivation)
-    *static_cast<uint32_t *>(resolve(*plan.invalidActivation).contents) = 0;
-
-  Command command(context);
+    command.emplace(context);
+    return {};
+  };
   CacheLineAlignedVector<Buffer> buffers;
-  for (const auto &dispatch : plan.dispatches) {
+  auto encode = [&](const Dispatch &dispatch) {
     buffers.clear();
     for (auto ref : dispatch.buffers)
       buffers.push_back(resolve(ref));
-    command.encode(dispatch.kernel, buffers.data(), buffers.size(),
-                   dispatch.params.data(), dispatch.paramSize,
-                   MTLSizeMake(dispatch.groupsX, dispatch.groupsY, 1),
-                   MTLSizeMake(dispatch.threadsX, dispatch.threadsY, 1));
-  }
-  if (auto error = command.finish(submitted))
-    return error;
-  if (plan.invalidActivation &&
-      *static_cast<const uint32_t *>(resolve(*plan.invalidActivation).contents))
-    return Error("Non-finite activation during W8A8 quantization");
-
-  MetalStepResult result{
-      newPast, plan.logitRows, scratchBytes, plan.dispatches.size(), {}, {}};
-  if (plan.logits) {
-    const auto *half =
-        static_cast<const uint16_t *>(resolve(*plan.logits).contents);
-    result.logits.resize(plan.logitElements);
-    std::transform(half, half + plan.logitElements, result.logits.begin(),
-                   halfToFloat);
-  }
-  if (tracePlan)
-    for (const auto &dispatch : plan.dispatches)
+    command->encode(dispatch.kernel, buffers.data(), buffers.size(),
+                    dispatch.params, dispatch.paramSize,
+                    MTLSizeMake(dispatch.groupsX, dispatch.groupsY, 1),
+                    MTLSizeMake(dispatch.threadsX, dispatch.threadsY, 1));
+    ++result.dispatchCount;
+    if (tracePlan)
       result.dispatches.push_back({dispatch.opIndex, dispatch.kernel,
                                    dispatch.epilogue ? dispatch.epilogue : "",
                                    dispatch.fusedOpIndex});
+  };
+  auto plan =
+      MetalExecutionPlan::lower(graph, model, layout, maxBufferLength(),
+                                flashAttentionSupported, prepare, encode);
+  if (!plan)
+    return plan.getError();
+
+  std::memcpy(resolve(plan->tokens).contents, ids.data(),
+              ids.size() * sizeof(uint32_t));
+  if (plan->invalidActivation)
+    *static_cast<uint32_t *>(resolve(*plan->invalidActivation).contents) = 0;
+  if (auto error = command->finish(submitted))
+    return error;
+  if (plan->invalidActivation &&
+      *static_cast<const uint32_t *>(
+          resolve(*plan->invalidActivation).contents))
+    return Error("Non-finite activation during W8A8 quantization");
+
+  result.logitRows = plan->logitRows;
+  if (plan->logits) {
+    const auto *half =
+        static_cast<const uint16_t *>(resolve(*plan->logits).contents);
+    result.logits.resize(plan->logitElements);
+    std::transform(half, half + plan->logitElements, result.logits.begin(),
+                   halfToFloat);
+  }
   return result;
 }
 } // namespace
@@ -269,14 +278,10 @@ MetalSession::step(const CacheLineAlignedVector<uint32_t> &ids, LogitsMode mode,
         return supported.getError();
       flashAttentionSupported = *supported;
     }
-    auto plan = MetalExecutionPlan::lower(
-        *graph, impl->model, executor.getLayout(), executor.maxBufferLength(),
-        flashAttentionSupported);
-    if (!plan)
-      return plan.getError();
     uint64_t newPast = impl->past + ids.size();
     bool submitted;
-    auto result = executor.execute(*plan, ids, newPast, tracePlan, submitted);
+    auto result = executor.execute(*graph, impl->model, ids, newPast, tracePlan,
+                                   flashAttentionSupported, submitted);
     if (!result) {
       impl->invalid = submitted;
       return result.getError();

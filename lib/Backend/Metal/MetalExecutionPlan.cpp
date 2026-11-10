@@ -5,7 +5,7 @@
 #include "llminfer/ModelFormat/Quantization.h"
 #include "llminfer/Support/CheckedArithmetic.h"
 #include <algorithm>
-#include <cstring>
+#include <array>
 
 using namespace llminfer;
 using namespace llminfer::ir;
@@ -96,11 +96,14 @@ public:
         flashAttentionSupported(flashAttentionSupported), step(graph.getStep()),
         bindings(graph.getValues().size()), fusions(graph.getOps().size()) {}
 
-  Result<MetalExecutionPlan> run();
+  Result<MetalExecutionPlan>
+  run(const MetalExecutionPlan::PrepareScratch &prepare,
+      const MetalExecutionPlan::EncodeDispatch &encode);
 
 private:
   Error prepareValues();
   void prepareFusions();
+  Error walkOps();
   Error lower(const Operation &op);
   Error linear(const Operation &op);
   Error linear(size_t producer, ValueId result, std::optional<ValueId> aux = {},
@@ -121,22 +124,19 @@ private:
   }
 
   BufferRef allocate(uint64_t bytes, size_t lastUse);
+  BufferRef temporary(uint64_t bytes, size_t lastUse);
   BufferRef dense(ValueId id);
   BufferRef state(StateId id) const { return {BufferSpace::State, id.index}; }
 
   template <typename Params>
   void dispatch(const char *kernel, std::initializer_list<BufferRef> buffers,
                 const Params &params, unsigned groupsX, unsigned groupsY,
-                unsigned threadsX, unsigned threadsY) {
-    static_assert(sizeof(params) <= sizeof(Dispatch::params));
-    if (failure)
+                unsigned threadsX, unsigned threadsY,
+                const char *epilogue = nullptr, size_t fusedOpIndex = 0) {
+    if (!encoder || failure)
       return;
-    Dispatch command{
-        kernel,  opIndex,        CacheLineAlignedVector<BufferRef>(buffers),
-        {},      sizeof(params), groupsX,
-        groupsY, threadsX,       threadsY};
-    std::memcpy(command.params.data(), &params, sizeof(params));
-    plan.dispatches.push_back(std::move(command));
+    (*encoder)({kernel, opIndex, buffers, &params, sizeof(params), groupsX,
+                groupsY, threadsX, threadsY, epilogue, fusedOpIndex});
   }
 
   template <typename Params>
@@ -157,6 +157,9 @@ private:
   CacheLineAlignedVector<ProjectionFusion> fusions;
   CacheLineAlignedVector<uint64_t> valueCounts;
   CacheLineAlignedVector<size_t> slotLastUse;
+  CacheLineAlignedVector<size_t> temporarySlots;
+  size_t nextTemporary = 0;
+  const MetalExecutionPlan::EncodeDispatch *encoder = nullptr;
   MetalExecutionPlan plan;
   size_t opIndex = 0;
   Error failure;
@@ -192,6 +195,10 @@ Result<uint64_t> metal::getStateBytes(const StateDesc &state) {
 BufferRef Lowering::allocate(uint64_t bytes, size_t lastUse) {
   if (failure)
     return {};
+  if (encoder) {
+    failure = Error("Cannot allocate scratch slots during Metal encoding");
+    return {};
+  }
   if (bytes > maxBufferLength) {
     failure = Error("Temporary tensor exceeds Metal maxBufferLength");
     return {};
@@ -219,6 +226,24 @@ BufferRef Lowering::allocate(uint64_t bytes, size_t lastUse) {
   plan.scratchBytes.push_back(bytes);
   slotLastUse.push_back(lastUse);
   return {BufferSpace::Scratch, slot};
+}
+
+BufferRef Lowering::temporary(uint64_t bytes, size_t lastUse) {
+  if (failure)
+    return {};
+  if (!encoder) {
+    auto ref = allocate(bytes, lastUse);
+    if (!failure)
+      temporarySlots.push_back(ref.index);
+    return ref;
+  }
+  if (nextTemporary >= temporarySlots.size() ||
+      bytes > plan.scratchBytes[temporarySlots[nextTemporary]]) {
+    failure =
+        Error("Metal lowering changed the scratch layout during encoding");
+    return {};
+  }
+  return {BufferSpace::Scratch, temporarySlots[nextTemporary++]};
 }
 
 Error Lowering::prepareValues() {
@@ -402,7 +427,7 @@ BufferRef Lowering::dense(ValueId id) {
     params.dims[i] = desc.type.shape[i];
     params.strides[i] = desc.strides[i];
   }
-  auto copy = allocate(uint64_t(params.count) * 2, opIndex);
+  auto copy = temporary(uint64_t(params.count) * 2, opIndex);
   dispatch("copyHalfView", {buffer, copy}, params, params.count);
   return copy;
 }
@@ -449,6 +474,8 @@ Error Lowering::linear(size_t producer, ValueId result,
   auto biasBuffer = bias ? dense(*bias) : input;
   unsigned rows = shape(result)[0];
   unsigned width = shape(result)[1];
+  const char *epilogue = epilogueName(fusion.kind);
+  size_t fusedOpIndex = producer == opIndex ? fusion.consumer : producer;
   const auto &shards = weights[weight.index];
   for (size_t i = 0; i < shards.size(); ++i) {
     unsigned first = shards[i].firstRow, cols = shards[i].rowCount;
@@ -466,7 +493,8 @@ Error Lowering::linear(size_t producer, ValueId result,
                 biasBuffer},
                LinearW8Params{width, first, groups, rows, cols, fusion.kind,
                               fusion.block},
-               launch.groupsX, launch.groupsY, linearW8WorkgroupSize, 1);
+               launch.groupsX, launch.groupsY, linearW8WorkgroupSize, 1,
+               epilogue, fusedOpIndex);
     } else {
       unsigned inputWidth = shape(op.inputs[0])[1];
       dispatch("linearF16", {input, weight, output, auxiliary, biasBuffer},
@@ -474,12 +502,7 @@ Error Lowering::linear(size_t producer, ValueId result,
                             fusion.block},
                (uint64_t(cols) + linearTile - 1) / linearTile,
                (uint64_t(rows) + linearTile - 1) / linearTile, linearTile,
-               linearTile);
-    }
-    if (!failure && fusion.kind != LinearNone) {
-      plan.dispatches.back().epilogue = epilogueName(fusion.kind);
-      plan.dispatches.back().fusedOpIndex =
-          producer == opIndex ? fusion.consumer : producer;
+               linearTile, epilogue, fusedOpIndex);
     }
   }
   return failure;
@@ -515,7 +538,7 @@ Error Lowering::attention(const Operation &op) {
   if (!checkedMul(queryRows, step.past + step.tokens, scoreCount) ||
       scoreCount > UINT32_MAX)
     return Error("GQA score buffer exceeds the 32-bit index range");
-  auto scores = allocate(scoreCount * 2, opIndex);
+  auto scores = temporary(scoreCount * 2, opIndex);
   dispatch("gqaScores", {dense(op.inputs[0]), keys, scores}, params,
            scoreCount);
   dispatch("gqaSoftmax", {scores}, params, queryRows, 1,
@@ -655,7 +678,41 @@ Error Lowering::lower(const Operation &op) {
   return failure;
 }
 
-Result<MetalExecutionPlan> Lowering::run() {
+Error Lowering::walkOps() {
+  opIndex = 0;
+  for (const auto &op : graph.getOps()) {
+    const auto &fusion = fusions[opIndex];
+    if (fusion.deferred()) {
+      ++opIndex;
+      continue;
+    }
+    if (!encoder) {
+      for (auto id : op.outputs) {
+        const auto &desc = value(id);
+        if (desc.viewOf)
+          continue;
+        uint64_t stored;
+        if (!checkedMul(desc.type.shape[0], desc.strides[0], stored) ||
+            stored > UINT32_MAX)
+          return Error("Padded Metal tensor exceeds the 32-bit index range");
+        auto &binding = bindings[id.index];
+        unsigned bytes = fusion.kind == LinearSiluF32
+                             ? sizeof(float)
+                             : elementBytes(desc.type.element);
+        binding.buffer = allocate(stored * bytes, binding.lastUse);
+      }
+    }
+    if (auto error = lower(op))
+      return Error("Lowering op " + std::to_string(opIndex) + " (" +
+                   std::string(getName(op.kind)) + "): " + error.getMessage());
+    ++opIndex;
+  }
+  return failure;
+}
+
+Result<MetalExecutionPlan>
+Lowering::run(const MetalExecutionPlan::PrepareScratch &prepare,
+              const MetalExecutionPlan::EncodeDispatch &encode) {
   if (step.capacity > UINT32_MAX || weights.size() != model.getTensors().size())
     return Error("Metal context or weight layout is invalid");
   for (const auto &state : graph.getStates()) {
@@ -667,32 +724,8 @@ Result<MetalExecutionPlan> Lowering::run() {
   }
   if (auto error = prepareValues())
     return error;
-
-  for (const auto &op : graph.getOps()) {
-    const auto &fusion = fusions[opIndex];
-    if (fusion.deferred()) {
-      ++opIndex;
-      continue;
-    }
-    for (auto id : op.outputs) {
-      const auto &desc = value(id);
-      if (desc.viewOf)
-        continue;
-      uint64_t stored;
-      if (!checkedMul(desc.type.shape[0], desc.strides[0], stored) ||
-          stored > UINT32_MAX)
-        return Error("Padded Metal tensor exceeds the 32-bit index range");
-      auto &binding = bindings[id.index];
-      unsigned bytes = fusion.kind == LinearSiluF32
-                           ? sizeof(float)
-                           : elementBytes(desc.type.element);
-      binding.buffer = allocate(stored * bytes, binding.lastUse);
-    }
-    if (auto error = lower(op))
-      return Error("Lowering op " + std::to_string(opIndex) + " (" +
-                   std::string(getName(op.kind)) + "): " + error.getMessage());
-    ++opIndex;
-  }
+  if (auto error = walkOps())
+    return error;
 
   const auto &outputs = graph.getOutputs();
   if (!outputs.empty()) {
@@ -705,14 +738,23 @@ Result<MetalExecutionPlan> Lowering::run() {
     plan.logitRows = shape(id)[0];
     plan.logitElements = count(id);
   }
+  if (auto error = prepare(plan.scratchBytes))
+    return error;
+
+  // SSA bindings are fixed. Replay only the temporary slots in lowering order.
+  encoder = &encode;
+  if (auto error = walkOps())
+    return error;
+  if (nextTemporary != temporarySlots.size())
+    return Error("Metal lowering did not replay all scratch allocations");
   return std::move(plan);
 }
 
-Result<MetalExecutionPlan>
-MetalExecutionPlan::lower(const Graph &graph, const ModelFile &model,
-                          const WeightLayout &weights, uint64_t maxBufferLength,
-                          bool flashAttentionSupported) {
+Result<MetalExecutionPlan> MetalExecutionPlan::lower(
+    const Graph &graph, const ModelFile &model, const WeightLayout &weights,
+    uint64_t maxBufferLength, bool flashAttentionSupported,
+    const PrepareScratch &prepare, const EncodeDispatch &encode) {
   return Lowering(graph, model, weights, maxBufferLength,
                   flashAttentionSupported)
-      .run();
+      .run(prepare, encode);
 }

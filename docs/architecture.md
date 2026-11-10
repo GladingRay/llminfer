@@ -156,7 +156,7 @@ y     = qᵀ S1
 
 `QuantizeActivation` 产生一对 SSA 值，分别表示 INT8 数据和 FP32 scale。`LinearW8A8` 显式消费这对值及量化权重，验证器检查逻辑 K、分组大小和 scale 形状。共享同一输入的 Q/K/V、DeltaNet 的 qkv/z/a/b、MLP 的 gate/up 各复用一次量化，输入不同的输出投影和 down 投影单独量化。Metal 后端可融合 norm 与量化，或在 GEMM tile 内量化。只有在融合后实际省去全局缓冲区访问时，执行成本才扣除相应流量。
 
-**MetalExecutionPlan** 按 SSA 顺序遍历已验证的图，将节点转换为 kernel、参数、线程组尺寸和缓冲区绑定。每条 dispatch 保留来源 op ID。Reshape 和 Slice 先绑定到原存储，消费者需要连续布局时插入 `copyHalfView`。临时缓冲区按别名根值的最后一次使用复用。大矩阵按行分片，输出投影和 embedding 共享权重缓冲区。当前每步使用精确的 `T`、`P` 和容量构建计划。形状桶和计划缓存留给后续优化。
+**MetalExecutionPlan** 先分析融合、别名和生命周期，再按 SSA 顺序遍历图，确定每个 scratch slot 的最终容量。Reshape 和 Slice 绑定到原存储，需要连续布局时为 `copyHalfView` 预留临时 slot。临时缓冲区按别名根值的最后一次使用复用。大矩阵按行分片，输出投影和 embedding 共享权重缓冲区。当前每步使用精确的 `T`、`P` 和容量。形状桶和计划缓存留给后续优化。
 
 ### 线性投影 epilogue
 
@@ -170,7 +170,7 @@ Metal 降级层在安排临时缓冲区前识别可融合的激活消费者。FP
 
 Apple M2 上用同一份 Qwen3.5-4B W8A8 权重比较启用与禁用融合。32 token prefill 的 dispatch 数从 869 降到 813，随后每步 decode 从 860 降到 804。Prefill 和后续两步 decode 的 logits 逐元素一致。交替运行三轮 32 prefill、8 decode 后，中位吞吐基本持平，prefill 为 19.85 → 19.79 tok/s，decode 为 9.90 → 9.88 tok/s。
 
-**MetalExecutor** 将计划编码成 `MTLComputeCommandEncoder` 命令。每条 dispatch 使用独立 encoder，Metal 跟踪共享缓冲区的依赖。每个 prefill chunk 或 decode step 提交一个 command buffer，CPU 在 chunk 末尾等待一次并读取 logits。W8A8 在 GPU 上对激活按 32 元素动态量化，执行分组 INT32 点积和 FP32 缩放求和。当前 FP16 和 W8A8 路径共用浮点 attention 与 DeltaNet 状态 kernel。GQA 的基线实现为每个 chunk 暂存 `T × query_heads × (P+T)` 个 FP16 分数，支持的 chunk 大小受单缓冲区上限约束。[Apple Metal compute encoder](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/)
+**MetalExecutor** 按最终容量准备实际的 scratch buffer。第二次遍历时，降级层复用已确定的 SSA 绑定和临时 slot 顺序，把每条 dispatch 直接交给 executor 编码。`--plan` 在编码时记录 kernel 名称和来源 op ID。每条 dispatch 使用独立 encoder，Metal 跟踪共享缓冲区的依赖。每个 prefill chunk 或 decode step 完成编码后统一提交一个 command buffer，CPU 等待一次并读取 logits。W8A8 在 GPU 上对激活按 32 元素动态量化，执行分组 INT32 点积和 FP32 缩放求和。当前 FP16 和 W8A8 路径共用浮点 attention 与 DeltaNet 状态 kernel。GQA 的基线实现为每个 chunk 暂存 `T × query_heads × (P+T)` 个 FP16 分数，支持的 chunk 大小受单缓冲区上限约束。[Apple Metal compute encoder](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/)
 
 **MetalSession** 持有模型权重、卷积历史、递归状态和 KV cache。进入 step 前校验 token 和容量，按本次输入构建 GraphIR 并核对状态布局。成功完成后才推进已处理长度 `P`。GPU 提交后出现错误会使会话失效，`reset()` 清零状态和位置。跨会话共享权重属于后续运行时扩展。
 
