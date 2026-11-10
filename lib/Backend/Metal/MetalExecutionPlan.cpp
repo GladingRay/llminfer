@@ -11,7 +11,6 @@ using namespace llminfer::ir;
 using namespace llminfer::metal;
 
 namespace {
-constexpr unsigned simdWorkgroup = 32;
 constexpr unsigned linearTile = 16;
 constexpr unsigned elementWorkgroup = 64;
 static_assert(weightGroupSize == 32, "Metal kernels use Group32 weights");
@@ -307,8 +306,8 @@ Error Lowering::linear(const Operation &op) {
                 weight,
                 {BufferSpace::Scale, weight.index, i},
                 output},
-               LinearW8Params{width, first, groups}, cols, rows, simdWorkgroup,
-               1);
+               LinearW8Params{width, first, groups}, cols, rows,
+               linearW8WorkgroupSize, 1);
     } else {
       unsigned inputWidth = shape(op.inputs[0])[1];
       dispatch("linearF16", {input, weight, output},

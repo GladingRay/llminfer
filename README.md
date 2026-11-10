@@ -87,6 +87,17 @@ build/llmi-metal-bench --threads 65536 --iterations 512 --samples 9
 
 每个配置先预热并用 CPU 对拍采样线程的结果，再用 Metal command buffer 的 GPU 时间计算最快和中位 GOPS。每线程每次迭代执行 32 MAC，按 `1 MAC = 2 ops` 计数。`Peak measured` 是本次扫描的最高采样值。基准在寄存器中重复点积，测量该乘加循环的吞吐。完整 W8A8 matmul 还要读取矩阵、应用 scale 并归约。
 
+### W8A8 GEMM
+
+`gemm` 子命令运行推理使用的 `linearW8A8`。`M` 是激活行数，`N` 是输出列数，`K` 是点积长度。默认形状 `128 × 9216 × 2560` 对应 128 个 token 的 Qwen3.5 MLP 升维投影。
+
+```sh
+build/llmi-metal-bench gemm
+build/llmi-metal-bench gemm --m 1 --n 9216 --k 2560 --samples 9
+```
+
+工具构造 Group32 量化数据，预热后用 CPU 对拍，并报告最快和中位 GPU 时间与 GOPS。计时使用预先构造的 INT8 输入，覆盖矩阵读取、点积、应用 scale、归约和 FP16 写回。GOPS 按逻辑工作量 `2 × M × N × K` 计算，输出同时显示实际补齐的 `K`。
+
 ## FP16 Metal 参考图
 
 macOS 构建提供 `llmi-reference`。它从 `.llmi` 载入首个 DeltaNet 层和首个 GQA 层，以共享 embedding 和输出头连接两层。每个 token 参数代表一个 chunk，命令在同一个会话内依次执行，逐 chunk 输出包含中间结果和 cache 的 JSON 行。

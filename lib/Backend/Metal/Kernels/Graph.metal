@@ -79,7 +79,7 @@ kernel void linearW8A8(device const char *activation [[buffer(0)]],
                        uint simdLane [[thread_index_in_simdgroup]],
                        uint simdWidth [[threads_per_simdgroup]]) {
   float acc = 0.0f;
-  for (uint g = lane; g < p.groups; g += 32) {
+  for (uint g = lane; g < p.groups; g += linearW8WorkgroupSize) {
     uint a = row.y * p.groups + g;
     uint w = row.x * p.groups + g;
     device const char4 *av =
@@ -93,18 +93,18 @@ kernel void linearW8A8(device const char *activation [[buffer(0)]],
   }
   float subtotal = simd_sum(acc);
   uint out = row.y * p.outputWidth + p.firstRow + row.x;
-  if (simdWidth == 32) {
+  if (simdWidth == linearW8WorkgroupSize) {
     if (lane == 0)
       output[out] = half(subtotal);
     return;
   }
-  threadgroup float partials[32];
+  threadgroup float partials[linearW8WorkgroupSize];
   if (simdLane == 0)
     partials[simdIndex] = subtotal;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (lane == 0) {
     float total = 0.0f;
-    for (uint i = 0; i < (32 + simdWidth - 1) / simdWidth; ++i)
+    for (uint i = 0; i < (linearW8WorkgroupSize + simdWidth - 1) / simdWidth; ++i)
       total += partials[i];
     output[out] = half(total);
   }

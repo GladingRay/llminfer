@@ -13,6 +13,8 @@ struct QuantizeParams {
   unsigned rows, width, groups;
 };
 
+enum : unsigned { linearW8WorkgroupSize = 32 };
+
 struct LinearW8Params {
   unsigned outputWidth, firstRow, groups;
 };

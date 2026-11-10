@@ -1,12 +1,11 @@
+#include "Benchmark.h"
+#include "GemmBench.h"
 #include "Kernels/MicrobenchParams.h"
-#include "MetalContext.h"
-#include "llminfer/Support/CacheLineAlignedVector.h"
-#include <algorithm>
 #include <charconv>
-#include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <string_view>
 
 using namespace llminfer;
@@ -19,23 +18,38 @@ struct Options {
   unsigned threads = 32768;
   unsigned iterations = 1024;
   unsigned samples = 7;
+  std::optional<GemmShape> gemm;
 };
 
 Result<Options> parseOptions(int argc, char **argv) {
   Options options;
-  for (int i = 1; i < argc; ++i) {
+  int first = 1;
+  if (argc > 1 && std::string_view(argv[1]) == "gemm") {
+    options.gemm.emplace();
+    ++first;
+  }
+  for (int i = first; i < argc; ++i) {
     std::string_view flag = argv[i];
     unsigned *target;
     unsigned limit;
-    if (flag == "--threads") {
-      target = &options.threads;
-      limit = 1 << 20;
-    } else if (flag == "--iterations") {
-      target = &options.iterations;
-      limit = 1 << 16;
-    } else if (flag == "--samples") {
+    if (flag == "--samples") {
       target = &options.samples;
       limit = 101;
+    } else if (options.gemm &&
+               (flag == "--m" || flag == "--n" || flag == "--k")) {
+      if (flag == "--m")
+        target = &options.gemm->m;
+      else if (flag == "--n")
+        target = &options.gemm->n;
+      else
+        target = &options.gemm->k;
+      limit = 1 << 16;
+    } else if (!options.gemm && flag == "--threads") {
+      target = &options.threads;
+      limit = 1 << 20;
+    } else if (!options.gemm && flag == "--iterations") {
+      target = &options.iterations;
+      limit = 1 << 16;
     } else {
       return Error("Unknown option: " + std::string(flag));
     }
@@ -49,8 +63,9 @@ Result<Options> parseOptions(int argc, char **argv) {
       return Error(std::string(flag) + " must be in [1, " +
                    std::to_string(limit) + "]");
   }
-  if (uint64_t(options.threads) * options.iterations * macsPerIteration >
-      (uint64_t{1} << 34))
+  if (!options.gemm &&
+      uint64_t(options.threads) * options.iterations * macsPerIteration >
+          (uint64_t{1} << 34))
     return Error("Benchmark workload exceeds 2^34 MACs per dispatch");
   return options;
 }
@@ -80,25 +95,7 @@ Error verify(const Int8BenchParams &params, const uint32_t *output) {
   return {};
 }
 
-Result<double> dispatch(MetalContext &context, const Int8BenchParams &params,
-                        Buffer output, unsigned groupSize) {
-  @autoreleasepool {
-    Command command(context);
-    command.encode(
-        "benchInt8Mac", &output, 1, &params, sizeof(params),
-        MTLSizeMake((params.threads + groupSize - 1) / groupSize, 1, 1),
-        MTLSizeMake(groupSize, 1, 1));
-    bool submitted;
-    if (auto error = command.finish(submitted))
-      return error;
-    double seconds = command.getGpuSeconds();
-    if (!std::isfinite(seconds) || seconds <= 0)
-      return Error("Metal did not report a positive GPU execution time");
-    return seconds;
-  }
-}
-
-Error run(const Options &options) {
+Error benchmarkMac(const Options &options) {
   auto context = MetalContext::create();
   if (!context)
     return context.getError();
@@ -130,28 +127,28 @@ Error run(const Options &options) {
 
   double peak = 0;
   unsigned peakGroup = 0;
-  CacheLineAlignedVector<double> times(options.samples);
   auto *results = static_cast<uint32_t *>((*output).contents);
   for (unsigned group = simdWidth; group <= groupLimit; group *= 2) {
+    auto launch = [&]() {
+      return timeDispatch(
+          *context, "benchInt8Mac", {*output}, params,
+          MTLSizeMake((params.threads + group - 1) / group, 1, 1),
+          MTLSizeMake(group, 1, 1));
+    };
     std::fill_n(results, size_t(params.threads) * int8BenchChains, 0u);
-    auto warmup = dispatch(*context, params, *output, group);
+    auto warmup = launch();
     if (!warmup)
       return warmup.getError();
     if (auto error = verify(params, results))
       return error;
-    for (double &time : times) {
-      auto sample = dispatch(*context, params, *output, group);
-      if (!sample)
-        return sample.getError();
-      time = *sample;
-    }
-    std::sort(times.begin(), times.end());
-    double best = gigaOps / times.front();
-    double median =
-        (times[(times.size() - 1) / 2] + times[times.size() / 2]) / 2;
+    auto timing = measureGpu(options.samples, launch);
+    if (!timing)
+      return timing.getError();
+    double best = gigaOps / timing->bestSeconds;
     std::cout << std::fixed << std::setprecision(2) << "Group " << group
-              << ": best " << best << " GOPS, median " << gigaOps / median
-              << " GOPS (best GPU time " << times.front() * 1e3 << " ms)\n";
+              << ": best " << best << " GOPS, median "
+              << gigaOps / timing->medianSeconds << " GOPS (best GPU time "
+              << timing->bestSeconds * 1e3 << " ms)\n";
     if (best > peak) {
       peak = best;
       peakGroup = group;
@@ -165,8 +162,12 @@ Error run(const Options &options) {
 
 int main(int argc, char **argv) {
   @autoreleasepool {
-    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+    if ((argc == 2 && std::string_view(argv[1]) == "--help") ||
+        (argc == 3 && std::string_view(argv[1]) == "gemm" &&
+         std::string_view(argv[2]) == "--help")) {
       std::cout << "Usage: llmi-metal-bench [--threads N] [--iterations N] "
+                   "[--samples N]\n"
+                << "       llmi-metal-bench gemm [--m M] [--n N] [--k K] "
                    "[--samples N]\n";
       return EXIT_SUCCESS;
     }
@@ -180,7 +181,9 @@ int main(int argc, char **argv) {
       std::cerr << "llmi-metal-bench: No Metal device available\n";
       return 77;
     }
-    if (auto error = run(*options)) {
+    auto error = options->gemm ? benchmarkGemm(*options->gemm, options->samples)
+                               : benchmarkMac(*options);
+    if (error) {
       std::cerr << "llmi-metal-bench: " << error.getMessage() << '\n';
       return EXIT_FAILURE;
     }
